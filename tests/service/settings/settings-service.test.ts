@@ -126,13 +126,17 @@ vi.mock('../../../src/shared/defaults-json.js', () => ({
   _set_TABLE_TEMPLATE_ACU: mockSetTableTemplate,
 }));
 
-vi.mock('../../../src/shared/defaults', () => ({
-  DEFAULT_AUTO_UPDATE_FREQUENCY_ACU: 1,
-  DEFAULT_AUTO_UPDATE_THRESHOLD_ACU: 3,
-  DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
-  buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [] }),
-  buildDefaultContentOptimizationPromptGroup_ACU: () => [],
-}));
+vi.mock('../../../src/shared/defaults', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/shared/defaults')>();
+  return {
+    ...actual,
+    DEFAULT_AUTO_UPDATE_FREQUENCY_ACU: 1,
+    DEFAULT_AUTO_UPDATE_THRESHOLD_ACU: 3,
+    DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
+    buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [] }),
+    buildDefaultContentOptimizationPromptGroup_ACU: () => [],
+  };
+});
 
 vi.mock('../../../src/data/repositories/isolation-repo', () => ({
   addDataIsolationHistory_ACU: mockAddDataIsolationHistory,
@@ -250,6 +254,9 @@ beforeEach(() => {
 // ═══ saveSettings_ACU ═══
 describe('saveSettings_ACU', () => {
   it('tavern 存储正常时返回 { saved: true, storageType: "tavern" }', () => {
+    loadSettings_ACU();
+    mockPersistSettingsToStorage.mockClear();
+    mockSaveGlobalMeta.mockClear();
     mockGetConfigStorage.mockReturnValue({ _isTavern: true, getItem: vi.fn(), setItem: vi.fn() });
     const result = saveSettings_ACU();
     expect(result).toEqual({ saved: true, storageType: 'tavern' });
@@ -258,6 +265,7 @@ describe('saveSettings_ACU', () => {
   });
 
   it('非 tavern + IndexedDB 可用时返回 indexeddb 并带 warning', () => {
+    loadSettings_ACU();
     mockGetConfigStorage.mockReturnValue({ _isTavern: false });
     mockIsIndexedDbAvailable.mockReturnValue(true);
     const result = saveSettings_ACU();
@@ -267,6 +275,7 @@ describe('saveSettings_ACU', () => {
   });
 
   it('非 tavern + IndexedDB 不可用时返回 memory 并带 warning', () => {
+    loadSettings_ACU();
     mockGetConfigStorage.mockReturnValue({ _isTavern: false });
     mockIsIndexedDbAvailable.mockReturnValue(false);
     const result = saveSettings_ACU();
@@ -276,6 +285,7 @@ describe('saveSettings_ACU', () => {
   });
 
   it('getConfigStorage 抛错时返回 { saved: false, error }', () => {
+    loadSettings_ACU();
     mockGetConfigStorage.mockImplementation(() => { throw new Error('存储异常'); });
     const result = saveSettings_ACU();
     expect(result.saved).toBe(false);

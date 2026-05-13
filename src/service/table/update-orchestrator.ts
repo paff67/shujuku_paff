@@ -36,13 +36,15 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
     const preset = overrides[normalizedName];
     return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
 }
-import { checkIfFirstTimeInit_ACU, saveIndependentTableToChatHistory_ACU } from './table-service';
+import { checkIfFirstTimeInit_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { parseAndApplyTableEdits_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
-import { reloadStorageProvider } from './table-storage-strategy';
+import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { clearTableDataAtFloors_ACU } from '../chat/chat-service';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
+import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
 
 // ============================================================
 // 类型定义：返回值 + 进度事件（service 层不驱动 UI）
@@ -103,6 +105,106 @@ export interface ManualUpdateResult {
 // 核心业务函数
 // ============================================================
 
+function cloneTableDataForDelta_ACU(data: any): TableDataObject_ACU | null {
+    if (!data || typeof data !== 'object') return null;
+    return JSON.parse(JSON.stringify(data)) as TableDataObject_ACU;
+}
+
+function hasRealDataRows_ACU(sheet: any): boolean {
+    const content = sheet?.content;
+    return Array.isArray(content) && content.length > 1;
+}
+
+function isHeaderOnlySheet_ACU(sheet: any): boolean {
+    const content = sheet?.content;
+    return Array.isArray(content) && content.length <= 1;
+}
+
+function cloneJson_ACU<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function resolveRowIdentityColumnIndex_ACU(header: any): number {
+    if (!Array.isArray(header) || header.length === 0) return 0;
+    const rowIdIndex = header.findIndex((cell: any) => String(cell ?? '').trim().toLowerCase() === 'row_id');
+    return rowIdIndex >= 0 ? rowIdIndex : 0;
+}
+
+function getRowIdentity_ACU(row: any, identityColumnIndex: number): string | null {
+    if (!Array.isArray(row)) return null;
+    const value = row[identityColumnIndex];
+    if (value === null || value === undefined) return null;
+    const identity = String(value).trim();
+    return identity ? identity : null;
+}
+
+function mergeSheetContentPreservingBatchRows_ACU(batchSheet: any, providerSheet: any): any[][] | null {
+    const batchContent = batchSheet?.content;
+    const providerContent = providerSheet?.content;
+    if (!Array.isArray(providerContent) || providerContent.length <= 1) return null;
+
+    const batchHeader = Array.isArray(batchContent?.[0]) ? batchContent[0] : null;
+    const providerHeader = Array.isArray(providerContent[0]) ? providerContent[0] : null;
+    const headerToKeep = batchHeader || providerHeader;
+    if (!headerToKeep) return null;
+
+    const identityColumnIndex = resolveRowIdentityColumnIndex_ACU(headerToKeep);
+    const mergedRows: any[][] = [];
+    const seenIdentities = new Set<string>();
+
+    if (Array.isArray(batchContent) && batchContent.length > 1) {
+        for (const row of batchContent.slice(1)) {
+            if (!Array.isArray(row)) continue;
+            const clonedRow = cloneJson_ACU(row);
+            mergedRows.push(clonedRow);
+            const identity = getRowIdentity_ACU(clonedRow, identityColumnIndex);
+            if (identity) seenIdentities.add(identity);
+        }
+    }
+
+    for (const row of providerContent.slice(1)) {
+        if (!Array.isArray(row)) continue;
+        const identity = getRowIdentity_ACU(row, identityColumnIndex);
+        if (identity && seenIdentities.has(identity)) continue;
+        const clonedRow = cloneJson_ACU(row);
+        mergedRows.push(clonedRow);
+        if (identity) seenIdentities.add(identity);
+    }
+
+    return cloneJson_ACU([headerToKeep, ...mergedRows]);
+}
+
+function mergeProviderRowsIntoBatchSheets_ACU(
+    mergedBatchData: Record<string, any>,
+    providerCurrentData: TableDataObject_ACU | null,
+    batchSheetKeys: string[],
+): number {
+    if (!providerCurrentData || typeof providerCurrentData !== 'object') return 0;
+
+    let patchedCount = 0;
+    for (const sheetKey of batchSheetKeys) {
+        const batchSheet = mergedBatchData[sheetKey];
+        const providerSheet = (providerCurrentData as Record<string, any>)[sheetKey];
+        if (!batchSheet || !providerSheet) continue;
+        if (!hasRealDataRows_ACU(providerSheet)) continue;
+
+        const mergedContent = mergeSheetContentPreservingBatchRows_ACU(batchSheet, providerSheet);
+        if (!mergedContent) continue;
+
+        const originalContent = JSON.stringify(batchSheet.content || []);
+        const nextContent = JSON.stringify(mergedContent);
+        if (originalContent === nextContent) continue;
+
+        mergedBatchData[sheetKey] = {
+            ...cloneJson_ACU(providerSheet),
+            ...batchSheet,
+            content: mergedContent,
+        };
+        patchedCount++;
+    }
+    return patchedCount;
+}
+
 /**
  * 加载批次基础数据：从聊天记录中为每个表格查找最新数据
  * 纯业务逻辑，不涉及任何 UI 操作
@@ -121,10 +223,15 @@ function restoreGuideStructure(mergedSheet: any, guideSheet: any): void {
     if (!guideSheet || typeof guideSheet !== 'object') return;
     if (!mergedSheet || typeof mergedSheet !== 'object') return;
 
-    // 恢复 sourceData（包含 DDL、note 等用户在可视化编辑器中修改的关键配置）
-    if (guideSheet.sourceData) mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+    // 恢复指导表/模板的结构配置。历史数据只负责提供行内容与可演进元信息，不应污染当前模板配置。
+    const structuralKeys = ['sourceData', 'updateConfig', 'exportConfig'];
+    for (const key of structuralKeys) {
+        if (Object.prototype.hasOwnProperty.call(guideSheet, key)) {
+            mergedSheet[key] = JSON.parse(JSON.stringify(guideSheet[key]));
+        }
+    }
 
-    // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
+    // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的，但不能覆盖历史数据行。
     if (Array.isArray(guideSheet.content) && guideSheet.content.length > 0 &&
         Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
         mergedSheet.content[0] = JSON.parse(JSON.stringify(guideSheet.content[0]));
@@ -150,72 +257,28 @@ export function loadBatchBaseData_ACU(
         }
     });
 
-    for (let j = firstMessageIndexOfBatch - 1; j >= 0; j--) {
-        const msg = chatHistory[j];
-        if (msg.is_user) continue;
+    const reconstructed = reconstructTablesFromChatDeltas_ACU(chatHistory, {
+        isolationKey: batchIsolationKey,
+        isolationConfig: {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        },
+        templateSheetKeys: batchSheetKeys,
+    }, {
+        targetMessageIndexExclusive: firstMessageIndexOfBatch,
+        saveChatAfterMigration: false,
+        retainRecentLayers: settings_ACU.retainRecentLayers,
+    });
 
-        // [优先级1] 新版按标签分组存储
-        if (msg.TavernDB_ACU_IsolatedData && msg.TavernDB_ACU_IsolatedData[batchIsolationKey]) {
-            const tagData = msg.TavernDB_ACU_IsolatedData[batchIsolationKey];
-            const independentData = tagData.independentData || {};
-
-            Object.keys(independentData).forEach(storedSheetKey => {
-                if (batchFoundSheets[storedSheetKey] === false && mergedBatchData[storedSheetKey]) {
-                    mergedBatchData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                    restoreGuideStructure(mergedBatchData[storedSheetKey], guideSnapshots[storedSheetKey]);
-                    batchFoundSheets[storedSheetKey] = true;
-                }
-            });
+    const reconstructedData: Record<string, any> = reconstructed.data || {};
+    batchSheetKeys.forEach(sheetKey => {
+        const reconstructedSheet = reconstructedData[sheetKey];
+        if (reconstructedSheet && mergedBatchData[sheetKey]) {
+            mergedBatchData[sheetKey] = JSON.parse(JSON.stringify(reconstructedSheet));
+            restoreGuideStructure(mergedBatchData[sheetKey], guideSnapshots[sheetKey]);
+            batchFoundSheets[sheetKey] = true;
         }
-
-        // [优先级2] 兼容旧版存储格式
-        const msgIdentity = msg.TavernDB_ACU_Identity;
-        let isLegacyMatch = false;
-        if (settings_ACU.dataIsolationEnabled) {
-            isLegacyMatch = (msgIdentity === settings_ACU.dataIsolationCode);
-        } else {
-            isLegacyMatch = !msgIdentity;
-        }
-
-        if (isLegacyMatch) {
-            if (msg.TavernDB_ACU_IndependentData) {
-                const independentData = msg.TavernDB_ACU_IndependentData;
-                Object.keys(independentData).forEach(storedSheetKey => {
-                    if (batchFoundSheets[storedSheetKey] === false && mergedBatchData[storedSheetKey]) {
-                        mergedBatchData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                        restoreGuideStructure(mergedBatchData[storedSheetKey], guideSnapshots[storedSheetKey]);
-                        batchFoundSheets[storedSheetKey] = true;
-                    }
-                });
-            }
-
-            if (msg.TavernDB_ACU_Data) {
-                const standardData = msg.TavernDB_ACU_Data;
-                Object.keys(standardData).forEach(k => {
-                    if (k.startsWith('sheet_') && batchFoundSheets[k] === false && mergedBatchData[k]) {
-                        mergedBatchData[k] = JSON.parse(JSON.stringify(standardData[k]));
-                        restoreGuideStructure(mergedBatchData[k], guideSnapshots[k]);
-                        batchFoundSheets[k] = true;
-                    }
-                });
-            }
-
-            if (msg.TavernDB_ACU_SummaryData) {
-                const summaryData = msg.TavernDB_ACU_SummaryData;
-                Object.keys(summaryData).forEach(k => {
-                    if (k.startsWith('sheet_') && batchFoundSheets[k] === false && mergedBatchData[k]) {
-                        mergedBatchData[k] = JSON.parse(JSON.stringify(summaryData[k]));
-                        restoreGuideStructure(mergedBatchData[k], guideSnapshots[k]);
-                        batchFoundSheets[k] = true;
-                    }
-                });
-            }
-        }
-
-        if (Object.values(batchFoundSheets).every(v => v === true)) {
-            break;
-        }
-    }
+    });
 
     const foundCount = Object.values(batchFoundSheets).filter(v => v === true).length;
     const totalCount = batchSheetKeys.length;
@@ -308,6 +371,8 @@ export async function executeCardUpdateCore_ACU(
 
         const SQL_ERROR_MARKER = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
         let lastSqlError: string | null = null;
+        let successfulBeforeData: TableDataObject_ACU | null = null;
+        let successfulAfterData: TableDataObject_ACU | null = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             if (wasStoppedByUser_ACU) {
@@ -342,6 +407,7 @@ export async function executeCardUpdateCore_ACU(
 
                 emitProgress({ phase: 'parsing' });
 
+                const attemptBeforeData = cloneTableDataForDelta_ACU(currentJsonTableData_ACU);
                 const parseResult = parseAndApplyTableEdits_ACU(aiResponse, updateMode, isImportMode);
 
                 let parseSuccess = false;
@@ -363,6 +429,8 @@ export async function executeCardUpdateCore_ACU(
                 // 无论 SQL 模式还是原生模式，都在这里兜底确保编码索引列被强制修正
                 applySpecialIndexSequenceToSummaryTables_ACU(currentJsonTableData_ACU);
 
+                successfulBeforeData = attemptBeforeData;
+                successfulAfterData = cloneTableDataForDelta_ACU(currentJsonTableData_ACU);
                 success = true;
                 break;
 
@@ -428,14 +496,20 @@ export async function executeCardUpdateCore_ACU(
                             return keysToTrackAsUpdated.includes(sheetKey);
                         })
                         : updateGroupKeysRaw;
-                    const saveSuccess = await saveIndependentTableToChatHistory_ACU(
-                        saveTargetIndex,
-                        keysToActuallySave,
-                        updateGroupKeysToUse,
-                        false,
-                        keysToTrackAsUpdated,
-                    );
-                    if (!saveSuccess) {
+                    if (!successfulBeforeData || !successfulAfterData) {
+                        return { success: false, modifiedKeys, error: '无法捕获填表前后数据库快照，已中止保存以避免生成错误 delta。' };
+                    }
+
+                    const saveResult = await persistTablesToChatMessage_ACU({
+                        targetMessageIndex: saveTargetIndex,
+                        targetSheetKeys: keysToActuallySave,
+                        updateGroupKeys: updateGroupKeysToUse,
+                        trackingSheetKeys: keysToTrackAsUpdated,
+                        trackAsUpdate: true,
+                        beforeData: successfulBeforeData,
+                        afterData: successfulAfterData,
+                    });
+                    if (!saveResult.saved) {
                         return { success: false, modifiedKeys, error: '无法将更新后的数据库保存到聊天记录。' };
                     }
                 } else {
@@ -547,7 +621,31 @@ export async function processUpdatesBatch_ACU(
 
             // 加载历史数据
             const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
-            _set_currentJsonTableData_ACU(mergedBatchData);
+            if (isSqliteMode()) {
+                const provider = getStorageProvider();
+                const providerCurrentDataBeforeReplace = provider.getCurrentData();
+                const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(
+                    mergedBatchData,
+                    providerCurrentDataBeforeReplace,
+                    batchSheetKeys,
+                );
+                if (patchedCount > 0) {
+                    logWarn_ACU(`[Batch ${batchNumber}] SQLite batch base preserved provider rows for ${patchedCount} sheet(s) before replacing runtime data.`);
+                }
+
+                await provider.replaceCurrentData(mergedBatchData as TableDataObject_ACU);
+                const providerCurrentData = provider.getCurrentData();
+                if (providerCurrentData) {
+                    _set_currentJsonTableData_ACU(providerCurrentData);
+                    logDebug_ACU(`[Batch ${batchNumber}] SQLite provider current data exported to JSON before prompt preparation.`);
+                } else {
+                    _set_currentJsonTableData_ACU(mergedBatchData);
+                    logWarn_ACU(`[Batch ${batchNumber}] SQLite provider returned null current data after replace; falling back to merged batch data.`);
+                }
+                logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
+            } else {
+                _set_currentJsonTableData_ACU(mergedBatchData);
+            }
             logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
 
             // 计算上下文范围
@@ -755,11 +853,16 @@ export async function orchestrateManualUpdate_ACU(
             const groupPromises = chunkKeys.map(gKey => (async () => {
                 const group = updateGroups[gKey];
 
-                logDebug_ACU(`[Manual Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetKeys.join(', ')}, apiPreset=(manual-global), chunk=${Math.floor(start / maxConcurrentGroups) + 1}`);
+                const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
+                const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
+                const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
+                const requestOptions = tableApiPreset ? { tableApiPreset } : null;
+
+                logDebug_ACU(`[Manual Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetKeys.join(', ')}, apiPreset=${tableApiPreset || '(manual-global)'}, chunk=${Math.floor(start / maxConcurrentGroups) + 1}`);
                 const batchResult = await processBatch(group.indices, 'manual_independent', {
                     targetSheetKeys: group.sheetKeys,
                     batchSize: group.batchSize,
-                    requestOptions: null,
+                    requestOptions,
                 });
 
                 return {

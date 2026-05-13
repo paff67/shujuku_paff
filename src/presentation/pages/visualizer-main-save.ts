@@ -69,6 +69,10 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary
       // [新增] 若开启“编码索引列特殊锁定”，保存时强制按 AM 序列重排
       applySpecialIndexSequenceToSummaryTables_ACU(orderedData);
       
+      const beforeDataForSave_ACU = currentJsonTableData_ACU
+          ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+          : null;
+
       // First, apply changes to local variable (使用排序后的数据)
       _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(orderedData)));
 
@@ -299,10 +303,20 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary
               showToastr_ACU('warning', '找不到AI消息，更改仅保存到内存，未持久化到聊天记录。');
           } else {
               // 2.4 分楼层保存，每层只保存属于该层的表
+              const afterDataForSave_ACU = currentJsonTableData_ACU
+                  ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+                  : null;
               for (const [indexStr, keys] of Object.entries(bucketByIndex)) {
                   const idx = parseInt(indexStr, 10);
                   if (Number.isNaN(idx)) continue;
-                  await saveIndependentTableToChatHistory_ACU(idx, keys as string[], null, true);
+                  await saveIndependentTableToChatHistory_ACU({
+                      targetMessageIndex: idx,
+                      targetSheetKeys: keys as string[],
+                      updateGroupKeys: null,
+                      beforeData: beforeDataForSave_ACU,
+                      afterData: afterDataForSave_ACU,
+                      trackAsUpdate: true,
+                  });
               }
 
               // 2.4.5 [关键] 如果本次在可视化编辑器删除了表格，则此处追溯整个聊天记录做“硬删除”

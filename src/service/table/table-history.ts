@@ -25,8 +25,23 @@ function isLegacyMatchForMessage_ACU(msg: any, settings: any): boolean {
     return !msgIdentity;
 }
 
+function getTablePersistenceLayerV2_ACU(msg: any, isolationKey: string): any {
+    return msg?.TavernDB_ACU_IsolatedData?.[isolationKey]?.tablePersistenceV2 || null;
+}
+
 function hasTableDataInMessage_ACU(msg: any, options: ResolveTableHistoryOptions_ACU): boolean {
     const { sheetKey, isSummaryTable, isolationKey, settings } = options;
+    const layer = getTablePersistenceLayerV2_ACU(msg, isolationKey);
+
+    if (layer?.checkpoint?.data?.[sheetKey]) {
+        return true;
+    }
+    if (Array.isArray(layer?.delta?.changedSheets) && layer.delta.changedSheets.includes(sheetKey)) {
+        return true;
+    }
+    if (layer?.delta?.changesBySheet?.[sheetKey]) {
+        return true;
+    }
 
     if (msg?.TavernDB_ACU_IsolatedData?.[isolationKey]?.independentData?.[sheetKey]) {
         return true;
@@ -47,6 +62,14 @@ function hasTableDataInMessage_ACU(msg: any, options: ResolveTableHistoryOptions
 function hasTrackedUpdateInMessage_ACU(msg: any, options: ResolveTableHistoryOptions_ACU): boolean {
     const { sheetKey, isolationKey, settings } = options;
     const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const layer = getTablePersistenceLayerV2_ACU(msg, isolationKey);
+    const v2ModifiedKeys = Array.isArray(layer?.delta?.modifiedKeys) ? layer.delta.modifiedKeys : [];
+    const v2UpdateGroupKeys = Array.isArray(layer?.delta?.updateGroupKeys) ? layer.delta.updateGroupKeys : [];
+
+    if (v2UpdateGroupKeys.includes(sheetKey) || v2ModifiedKeys.includes(sheetKey)) {
+        return true;
+    }
+
     const isolatedModifiedKeys = Array.isArray(tagData?.modifiedKeys) ? tagData.modifiedKeys : [];
     const isolatedUpdateGroupKeys = Array.isArray(tagData?.updateGroupKeys) ? tagData.updateGroupKeys : [];
 

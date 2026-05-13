@@ -102,9 +102,13 @@ vi.mock('../../../src/shared/utils', () => ({
   logWarn_ACU: mockLogWarn,
 }));
 
-vi.mock('../../../src/shared/constants', () => ({
-  getImportBatchPrefix_ACU: mockGetImportBatchPrefix,
-}));
+vi.mock('../../../src/shared/constants', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/shared/constants')>();
+  return {
+    ...actual,
+    getImportBatchPrefix_ACU: mockGetImportBatchPrefix,
+  };
+});
 
 vi.mock('../../../src/service/worldbook/injection-engine-config', () => ({
   DEFAULT_ENTRY_PLACEMENT_ACU: Object.freeze({ position: 'at_depth_as_system', depth: 2, order: 10000 }),

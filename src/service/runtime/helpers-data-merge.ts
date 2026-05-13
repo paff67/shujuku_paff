@@ -12,7 +12,11 @@ import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
 import { ensureSheetOrderNumbers_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { getTemplateSheetKeys_ACU } from '../template/chat-scope';
 import { upsertTemplatePreset_ACU } from '../template/template-preset-service';
-import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, readModifiedKeys_ACU, readUpdateGroupKeys_ACU, readMessageIdentity_ACU, isLegacyMatchForIsolation_ACU, initIsolatedTagSlot_ACU, writeLegacyCompatData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { initIsolatedTagSlot_ACU } from '../../data/repositories/chat-message-data-repo';
+import { reconstructTablesFromChatDeltas_ACU } from '../table/table-delta-reconstruct';
+import { clearCurrentIsolationLegacyTableSnapshots_ACU, writeTablePersistenceLayerV2_ACU } from '../table/table-delta-repository';
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
+import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
 
   /**
    * 旧数据兼容层：将 content 数组中的 null 占位列迁移为行号 row_id
@@ -54,192 +58,101 @@ import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStand
       return data;
   }
 
-  export async function mergeAllIndependentTables_ACU() {
+  export interface MergeAllIndependentTablesResult_ACU {
+      data: Record<string, any> | null;
+      usedLegacyMigration: boolean;
+      changed: boolean;
+      checkpointMessageIndex?: number;
+      foundSheetCount: number;
+  }
+
+  export async function mergeAllIndependentTablesWithMeta_ACU(): Promise<MergeAllIndependentTablesResult_ACU> {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
           logDebug_ACU('Cannot merge data: Chat history is empty.');
-          return null;
+          return { data: null, usedLegacyMigration: false, changed: false, foundSheetCount: 0 };
       }
 
-      // [数据隔离核心] 获取当前隔离标签键名
       const currentIsolationKey = getCurrentIsolationKey_ACU();
       logDebug_ACU(`[Merge] Loading data for isolation key: [${currentIsolationKey || '无标签'}]`);
 
-      // [新增] 聊天级"空白指导表"：一旦存在，本聊天合并/显示顺序都按指导表，不再按模板
-      // 注意：该指导表按隔离标签分槽，因此切换标识时可拥有不同的"参数/表头/顺序总指导"
       const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
       const hasSheetGuide = !!(sheetGuideData && typeof sheetGuideData === 'object' && Object.keys(sheetGuideData).some(k => k.startsWith('sheet_')));
 
-      // [新增] 获取当前模板/指导表的表格键列表，用于过滤非当前模板的数据
-      // 优先使用指导表（如果存在），否则使用当前模板
-      // 这样可以确保：切换/导入新模板后，只读取当前模板中存在的表格数据
       const templateSheetKeys = (() => {
           if (hasSheetGuide) {
-              // 存在指导表：使用指导表的表格键（指导表已在导入/切换模板时更新）
               return Object.keys(sheetGuideData).filter(k => k.startsWith('sheet_'));
           }
-          // 不存在指导表：使用当前模板的表格键
           return getTemplateSheetKeys_ACU();
       })();
-      const templateSheetKeySet = new Set(templateSheetKeys);
       logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})`);
 
-      // 1. [优化] 不使用模板作为基础，动态收集聊天记录中的所有实际数据
-      let mergedData: Record<string, any> = {};
-      const foundSheets: Record<string, boolean> = {};
+      const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
+      const reconstructResult = reconstructTablesFromChatDeltas_ACU(chat, {
+          isolationKey: currentIsolationKey,
+          isolationConfig,
+          templateSheetKeys,
+      }, {
+          allowLegacyMigration: true,
+          saveChatAfterMigration: true,
+          retainRecentLayers: settings_ACU.retainRecentLayers,
+      });
 
-      for (let i = chat.length - 1; i >= 0; i--) {
-          const message = chat[i];
-          if (message.is_user) continue;
+      let mergedData: Record<string, any> = reconstructResult.data ? JSON.parse(JSON.stringify(reconstructResult.data)) : {};
+      Object.keys(mergedData).forEach(k => {
+          if (k === 'mate') delete mergedData[k];
+      });
 
-          // [优先级1] 检查新版按标签分组存储
-          const tagData = readIsolatedTagData_ACU(message, currentIsolationKey);
-          if (tagData) {
-              const independentData = tagData.independentData || {};
-              const modifiedKeys = tagData.modifiedKeys || [];
-              const updateGroupKeys = tagData.updateGroupKeys || [];
+      const foundCount = Object.keys(mergedData).filter(k => k.startsWith('sheet_')).length;
+      logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history (${reconstructResult.usedLegacyMigration ? 'legacy-migrated' : 'v2'}).`);
 
-              Object.keys(independentData).forEach(storedSheetKey => {
-                  // [新增] 只处理当前模板/指导表中存在的表格
-                  if (!templateSheetKeySet.has(storedSheetKey)) {
-                      logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] - not in current template/guide`);
-                      return;
-                  }
-                  if (!foundSheets[storedSheetKey]) {
-                      mergedData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                      foundSheets[storedSheetKey] = true;
-
-                      // [修复] 如果数据来自基底状态消息（seedGreeting 写入的模板初始数据），
-                      // 在 sheet 上标记 _acu_from_base_state，供 SqlTableService.loadFromChat 区分
-                      // "基底数据"和"AI 真正填写的数据"，避免因基底数据提前建表
-                      if (tagData._acu_base_state === GREETING_LOCAL_BASE_STATE_MARKER_ACU) {
-                          mergedData[storedSheetKey]._acu_from_base_state = true;
-                      }
-
-                      // 更新表格状态
-                      let wasUpdated = false;
-                      if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                          wasUpdated = updateGroupKeys.includes(storedSheetKey);
-                      } else if (modifiedKeys.length > 0) {
-                          wasUpdated = modifiedKeys.includes(storedSheetKey);
-                      } else {
-                          wasUpdated = true;
-                      }
-
-                      if (wasUpdated) {
-                          if (!independentTableStates_ACU[storedSheetKey]) {
-                              independentTableStates_ACU[storedSheetKey] = {};
-                          }
-                          const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                          independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
-                      }
-                  }
-              });
-          }
-
-          // [优先级2] 兼容旧版存储格式 - 严格匹配隔离标签
-          // [数据隔离核心逻辑] 无标签也是标签的一种，严格隔离不同标签的数据
-          const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
-          const isLegacyMatch = isLegacyMatchForIsolation_ACU(message, isolationConfig);
-
-          if (isLegacyMatch) {
-              // 检查旧版独立数据格式
-              const legacyIndepData = readLegacyIndependentData_ACU(message);
-              if (legacyIndepData) {
-                  const independentData = legacyIndepData;
-                  const modifiedKeys = readModifiedKeys_ACU(message);
-                  const updateGroupKeys = readUpdateGroupKeys_ACU(message);
-
-                  Object.keys(independentData).forEach(storedSheetKey => {
-                      // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(storedSheetKey)) {
-                          logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] (legacy) - not in current template/guide`);
-                          return;
-                      }
-                      if (!foundSheets[storedSheetKey]) {
-                          mergedData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                          foundSheets[storedSheetKey] = true;
-
-                          let wasUpdated = false;
-                          if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                              wasUpdated = updateGroupKeys.includes(storedSheetKey);
-                          } else if (modifiedKeys.length > 0) {
-                              wasUpdated = modifiedKeys.includes(storedSheetKey);
-                          } else {
-                              wasUpdated = true;
-                          }
-
-                          if (wasUpdated) {
-                              if (!independentTableStates_ACU[storedSheetKey]) independentTableStates_ACU[storedSheetKey] = {};
-                              const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                              independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
-                          }
-                      }
-                  });
-              }
-
-              // 检查旧版标准表/总结表格式
-              const legacyStdData = readLegacyStandardData_ACU(message);
-              if (legacyStdData) {
-                  const standardData: any = legacyStdData;
-                  Object.keys(standardData).forEach(k => {
-                      // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(k)) {
-                          return;
-                      }
-                      if (k.startsWith('sheet_') && !foundSheets[k] && standardData[k].name && !isSummaryOrOutlineTable_ACU(standardData[k].name)) {
-                          mergedData[k] = JSON.parse(JSON.stringify(standardData[k]));
-                          foundSheets[k] = true;
-                          if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
-                          const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                          independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
-                      }
-                  });
-              }
-              const legacySumData = readLegacySummaryData_ACU(message);
-              if (legacySumData) {
-                  const summaryData: any = legacySumData;
-                  Object.keys(summaryData).forEach(k => {
-                      // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(k)) {
-                          return;
-                      }
-                      if (k.startsWith('sheet_') && !foundSheets[k] && summaryData[k].name && isSummaryOrOutlineTable_ACU(summaryData[k].name)) {
-                          mergedData[k] = JSON.parse(JSON.stringify(summaryData[k]));
-                          foundSheets[k] = true;
-                          if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
-                          const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                          independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
-                      }
-                  });
-              }
+      if (reconstructResult.changed) {
+          try {
+              await saveChatToHost_ACU();
+          } catch (error) {
+              logWarn_ACU('[TableDeltaMigration] Failed to persist lazy migration checkpoint:', error);
           }
       }
 
-      const foundCount = Object.keys(foundSheets).length;
-      logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history.`);
+      Object.keys(mergedData).forEach(storedSheetKey => {
+          if (!storedSheetKey.startsWith('sheet_')) return;
+          if (!independentTableStates_ACU[storedSheetKey]) {
+              independentTableStates_ACU[storedSheetKey] = {};
+          }
+          const currentAiFloor = reconstructResult.checkpointMessageIndex !== undefined
+              ? chat.slice(0, reconstructResult.checkpointMessageIndex + 1).filter(m => !m.is_user).length
+              : chat.filter(m => !m.is_user).length;
+          independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
+      });
 
-      // 如果没有任何数据：
-      // - 若存在"空白指导表"：优先返回"指导表物化结构"（表头+参数；seedRows 仅保留字段，不默认展开到 content）
-      // - 否则返回 null，让调用方按旧逻辑处理（例如用完整模板结构作为占位符）
       if (foundCount <= 0) {
           if (hasSheetGuide) {
-              // 直接物化：仅表头（seedRows 保留在字段中，但不作为"当前对话真实数据行"展示）
               const base = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
               const orderedKeys = getSortedSheetKeys_ACU(base);
-              return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(base, orderedKeys));
+              const data = migrateContentNullToRowId(reorderDataBySheetKeys_ACU(base, orderedKeys));
+              return {
+                  data,
+                  usedLegacyMigration: reconstructResult.usedLegacyMigration,
+                  changed: reconstructResult.changed,
+                  checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
+                  foundSheetCount: 0,
+              };
           }
-          return null;
+          return {
+              data: null,
+              usedLegacyMigration: reconstructResult.usedLegacyMigration,
+              changed: reconstructResult.changed,
+              checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
+              foundSheetCount: 0,
+          };
       }
 
-      // [兼容迁移] 旧版：updateConfig 的 0 表示"沿用UI"；新版：-1 表示"沿用UI"
-      // 注意：聊天记录里保存的是"单表对象"，没有 mate 标记，因此用 updateConfig.uiSentinel 作为表级标记。
       Object.keys(mergedData).forEach(k => {
           if (!k.startsWith('sheet_')) return;
           const sheet = mergedData[k];
           const uc = (sheet && typeof sheet === 'object') ? sheet.updateConfig : null;
           if (!uc || typeof uc !== 'object') return;
-          if (uc.uiSentinel === -1) return; // 已是新语义
+          if (uc.uiSentinel === -1) return;
           for (const field of ['contextDepth', 'updateFrequency', 'batchSize', 'skipFloors']) {
               if (Object.prototype.hasOwnProperty.call(uc, field) && uc[field] === 0) {
                   uc[field] = -1;
@@ -248,10 +161,6 @@ import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStand
           uc.uiSentinel = -1;
       });
 
-      // [新增] 若存在"空白指导表"，则：
-      // 1) 过滤掉不在指导表里的表（UI/填表只以指导表为准，避免旧表复活）
-      // 2) 对指导表中缺失的表：使用指导表结构作为初始值（seedRows 仅保留字段，不默认展开到 content）
-      // 3) 对于存在历史数据的表：以历史数据为主，但表名/表头/参数/顺序以指导表为准；不把 seedRows 合并进真实数据行
       if (hasSheetGuide) {
           const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
           const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
@@ -262,32 +171,27 @@ import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStand
               if (hist && typeof hist === 'object') {
                   const next = JSON.parse(JSON.stringify(hist));
                   next.uid = k;
-                  // 需求4（视觉编辑器改名/改表头/改参数）：合并展示以指导表为准（不影响历史真实数据行，仅覆盖"元信息/表头/参数/顺序"）
                   if (guideSheet?.name) next.name = guideSheet.name;
                   if (guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
                   if (guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
                   if (guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-                  // 表头：以指导表为准，并对行做简单对齐（pad/truncate）
                   const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
                       ? JSON.parse(JSON.stringify(guideSheet.content[0]))
                       : null;
-if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [["row_id"]];
+                  if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [["row_id"]];
                   if (guideHeader) {
                       next.content[0] = guideHeader;
                       const targetLen = guideHeader.length;
                       for (let r = 1; r < next.content.length; r++) {
                           const row = next.content[r];
                           if (!Array.isArray(row)) continue;
-                          // [修复] 在对齐行长度之前，保留 auto_merged 标签
                           const hasAutoMergedTag = row.length > 0 && row[row.length - 1] === 'auto_merged';
                           if (row.length < targetLen) {
                               while (row.length < targetLen) row.push('');
-                              // 如果原本有 auto_merged 标签，在填充后重新添加
                               if (hasAutoMergedTag && row[row.length - 1] !== 'auto_merged') {
                                   row.push('auto_merged');
                               }
                           } else if (row.length > targetLen) {
-                              // [修复] 截断时保留 auto_merged 标签
                               row.splice(targetLen);
                               if (hasAutoMergedTag) {
                                   row.push('auto_merged');
@@ -295,26 +199,58 @@ if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [
                           }
                       }
                   }
-                  // 顺序编号以指导表为准
                   if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-                  // 保留 seedRows 字段（不参与实际 content 合并）
                   if (Array.isArray(guideSheet?.seedRows)) next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
                   guided[k] = next;
               } else {
-                  // 无历史数据：直接使用指导表物化结果（不展开 seedRows）
                   if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
               }
           });
           mergedData = guided;
       }
 
-      // [修复] 合并结果按"用户手动顺序/模板顺序"重排，避免合并过程导致的随机乱序
       const orderedKeys = getSortedSheetKeys_ACU(mergedData);
       mergedData = reorderDataBySheetKeys_ACU(mergedData, orderedKeys);
-      return migrateContentNullToRowId(mergedData);
+      const data = migrateContentNullToRowId(mergedData);
+      return {
+          data,
+          usedLegacyMigration: reconstructResult.usedLegacyMigration,
+          changed: reconstructResult.changed,
+          checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
+          foundSheetCount: foundCount,
+      };
+  }
+
+  export async function mergeAllIndependentTables_ACU() {
+      const result = await mergeAllIndependentTablesWithMeta_ACU();
+      return result.data;
   }
 
   // [重构] 刷新合并数据并通知前端和更新世界书
+
+  export function getReadableContentStartColumn_ACU(headerRow: any): number {
+    if (!Array.isArray(headerRow) || headerRow.length === 0) return 0;
+    const firstHeader = String(headerRow[0] ?? '').trim().toLowerCase();
+    return firstHeader === 'row_id' ? 1 : 0;
+  }
+
+  export function hasReadableRowCellData_ACU(row: any, startColumn: number): boolean {
+    if (!Array.isArray(row)) return false;
+    for (let c = Math.max(0, startColumn); c < row.length; c++) {
+      const cell = row[c];
+      if (cell === null || cell === undefined) continue;
+      if (typeof cell === 'string') {
+        if (cell.trim() !== '') return true;
+      } else if (typeof cell === 'number') {
+        if (!Number.isNaN(cell)) return true;
+      } else if (typeof cell === 'boolean') {
+        return true;
+      } else {
+        return true;
+      }
+    }
+    return false;
+  }
 
   export function formatJsonToReadable_ACU(jsonData: Record<string, any> | null) {
     if (!jsonData) return { readableText: "数据库为空。", importantPersonsTable: null as any, summaryTable: null as any, outlineTable: null as any };
@@ -351,21 +287,25 @@ if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [
             if (table.exportConfig.injectIntoWorldbook === false) return; // Skip if injection is disabled
         }
         
+        const content = Array.isArray(table.content) ? table.content : [];
+        const headerRow = Array.isArray(content[0]) ? content[0] : [];
+        const startColumn = getReadableContentStartColumn_ACU(headerRow);
+        const headers = headerRow.slice(startColumn);
+        if (headers.length === 0) return;
+
+        const rows = content.slice(1).filter((row: any) => Array.isArray(row));
+        const hasDisplayableRows = rows.some((row: any[]) => hasReadableRowCellData_ACU(row, startColumn));
+        if (!hasDisplayableRows) return;
+
         // All other tables, including '全局数据表', are added to the readable text
         readableText += `# ${table.name}\n\n`;
-        const headers = table.content[0] ? table.content[0].slice(1) : [];
-        if (headers.length > 0) {
-            readableText += `| ${headers.join(' | ')} |\n`;
-            readableText += `|${headers.map(() => '---').join('|')}|\n`;
-        }
+        readableText += `| ${headers.join(' | ')} |\n`;
+        readableText += `|${headers.map(() => '---').join('|')}|\n`;
         
-        const rows = table.content.slice(1);
-        if (rows.length > 0) {
-            rows.forEach((row: any[]) => {
-                const rowData = row.slice(1);
-                readableText += `| ${rowData.join(' | ')} |\n`;
-            });
-        }
+        rows.forEach((row: any[]) => {
+            const rowData = row.slice(startColumn);
+            readableText += `| ${rowData.join(' | ')} |\n`;
+        });
         readableText += '\n';
     });
     
@@ -423,6 +363,41 @@ if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [
       return out;
   }
 
+  function createTemplateSeedCheckpointLayer_ACU(
+      data: TableDataObject_ACU,
+      isolationKey: string,
+      messageIndexHint: number,
+  ): TablePersistenceLayerV2_ACU {
+      const safeIsolation = String(isolationKey || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const now = new Date().toISOString();
+      return {
+          version: 2,
+          checkpoint: {
+              kind: 'checkpoint',
+              version: 2,
+              checkpointId: `template-seed-${safeIsolation}-${messageIndexHint}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+              createdAt: now,
+              source: 'template-seed',
+              isolationKey,
+              messageIndexHint,
+              data: JSON.parse(JSON.stringify(data)),
+          },
+      };
+  }
+
+  function writeTemplateSeedCheckpointToMessage_ACU(
+      msg: any,
+      isolationKey: string,
+      messageIndexHint: number,
+      data: TableDataObject_ACU,
+  ): void {
+      writeTablePersistenceLayerV2_ACU(msg, isolationKey, createTemplateSeedCheckpointLayer_ACU(data, isolationKey, messageIndexHint));
+      clearCurrentIsolationLegacyTableSnapshots_ACU(msg, isolationKey, {
+          enabled: settings_ACU.dataIsolationEnabled,
+          code: settings_ACU.dataIsolationCode,
+      });
+  }
+
   export async function seedGreetingLocalDataFromTemplate_ACU() {
       try {
           const chat = getChatArray_ACU();
@@ -448,20 +423,13 @@ if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [
           const isolationKey = getCurrentIsolationKey_ACU();
           const tagData = initIsolatedTagSlot_ACU(greetingMsg, isolationKey);
 
-          // 写入 independentData（只写 sheet_，不强制 modifiedKeys）
-          const indep: Record<string, any> = {};
-          Object.keys(baseData).forEach(k => {
-              if (!k.startsWith('sheet_')) return;
-              indep[k] = JSON.parse(JSON.stringify(baseData[k]));
-          });
-          tagData.independentData = indep;
-          // 这是一份"基底"，不应被认为是AI更新结果，因此 modifiedKeys 留空
+          // 这是一份"基底"，不应被认为是AI更新结果，因此 modifiedKeys 留空。
+          // 读取源头锁定为 tablePersistenceV2.checkpoint；不要再并行写 legacy-style independentData。
+          tagData.independentData = {};
           tagData.modifiedKeys = [];
           tagData.updateGroupKeys = [];
           tagData._acu_base_state = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
-
-          // 同步旧格式（兼容老逻辑）
-          writeLegacyCompatData_ACU(greetingMsg, JSON.parse(JSON.stringify(indep)), [], []);
+          writeTemplateSeedCheckpointToMessage_ACU(greetingMsg, isolationKey, firstAiIndex, baseData as TableDataObject_ACU);
 
           // 标记幂等
           greetingMsg._acu_local_template_base_state_seeded = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
@@ -548,9 +516,7 @@ if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [
           tagData.independentData = indep;
           tagData.modifiedKeys = [];
           tagData.updateGroupKeys = [];
-
-          // 同步旧格式（兼容老逻辑）
-          writeLegacyCompatData_ACU(firstMsg, JSON.parse(JSON.stringify(indep)), [], []);
+          writeTemplateSeedCheckpointToMessage_ACU(firstMsg, isolationKey, firstAiIndex, fullData as TableDataObject_ACU);
 
           // 同时更新指导表与聊天级模板快照（确保表头、参数、预设名同步）
           const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateObj, { stripSeedRows: false });

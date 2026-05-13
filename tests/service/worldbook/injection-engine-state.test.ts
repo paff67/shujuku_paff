@@ -10,7 +10,7 @@ const {
   mockGenerationGate, mockSetCurrentChatFileIdentifier, mockSetAllChatMessages,
   mockSetLastTotalAiMessages,
   mockGetCurrentWorldbookConfig,
-  mockGetLorebookEntries, mockDeleteLorebookEntries, mockGwGetCurrentCharPrimaryLorebook,
+  mockGetLorebookEntries, mockDeleteLorebookEntries, mockGwGetCurrentCharPrimaryLorebook, mockListLorebooks,
   mockGetChatArray, mockSaveChatToHost,
   mockApplyTemplateScopeForCurrentChat, mockLoadSettings, mockSaveSettings,
   mockGetSortedSheetKeys,
@@ -43,6 +43,7 @@ const {
   mockGetLorebookEntries: vi.fn(async () => []),
   mockDeleteLorebookEntries: vi.fn(async () => {}),
   mockGwGetCurrentCharPrimaryLorebook: vi.fn(async () => 'primary-lorebook'),
+  mockListLorebooks: vi.fn(async () => ['primary-lorebook', '角色世界书', '自定义世界书']),
   mockGetChatArray: vi.fn(() => []),
   mockSaveChatToHost: vi.fn(async () => {}),
   mockApplyTemplateScopeForCurrentChat: vi.fn(),
@@ -82,6 +83,7 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   getLorebookEntries_ACU: mockGetLorebookEntries,
   deleteLorebookEntries_ACU: mockDeleteLorebookEntries,
   getCurrentCharPrimaryLorebook_ACU: mockGwGetCurrentCharPrimaryLorebook,
+  listLorebooks_ACU: mockListLorebooks,
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({

@@ -4,8 +4,8 @@ import type {
     SummaryVectorIndexExternalFileRef_ACU,
     SummaryVectorIndexExternalFileRole_ACU,
     SummaryVectorIndexRegistryFile_ACU,
-} from '../../service/vector/summary-vector-index-types';
-import { SUMMARY_VECTOR_INDEX_REGISTRY_PATH_ACU } from '../../service/vector/summary-vector-index-types';
+} from '../../shared/models/summary-vector-index';
+import { SUMMARY_VECTOR_INDEX_REGISTRY_PATH_ACU } from '../../shared/models/summary-vector-index';
 
 export interface VectorIndexFileWriteResult_ACU {
     ok: boolean;

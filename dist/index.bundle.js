@@ -43,6 +43,10 @@
     function detectRuntimeMode() {
         if (_cachedMode !== null)
             return _cachedMode;
+        if (typeof window === 'undefined') {
+            _cachedMode = "extension" /* RuntimeMode.Extension */;
+            return _cachedMode;
+        }
         try {
             // 如果 window.parent 存在且不等于 window，说明在 iframe 中
             if (typeof window.parent !== 'undefined' && window.parent !== window) {
@@ -76,6 +80,9 @@
      * - 插件模式：返回 window（自身就是主窗口）
      */
     function getHostWindow() {
+        if (typeof window === 'undefined') {
+            return globalThis;
+        }
         if (isUserscriptMode()) {
             try {
                 return window.parent || window;
@@ -1319,14 +1326,10 @@ $CONTENT
         const maybeErrorMessage = typeof arg?.message === 'string' ? arg.message : '';
         const maybeErrorStack = typeof arg?.stack === 'string' ? arg.stack : '';
         if (arg instanceof Error || maybeErrorMessage || maybeErrorStack) {
-            const parts = [];
             const header = `${maybeErrorName || 'Error'}${maybeErrorMessage ? `: ${maybeErrorMessage}` : ''}`;
-            parts.push(header);
-            if (maybeErrorStack && maybeErrorStack !== header)
-                parts.push(maybeErrorStack);
             if (arg?.cause !== undefined)
-                parts.push(`cause=${normalizeLogArg_ACU(arg.cause)}`);
-            return parts.join(' | ');
+                return `${header} | cause=${normalizeLogArg_ACU(arg.cause)}`;
+            return header;
         }
         try {
             const json = JSON.stringify(arg, null, 0);
@@ -3690,6 +3693,19 @@ $CONTENT
         saveGlobalMeta_ACU();
         return globalMeta_ACU.vectorMemoryConfigGlobal;
     }
+    function updateGlobalVectorMemoryConfigFields_ACU(patch) {
+        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+        globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
+        settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+        Object.keys(patch || {}).forEach((field) => {
+            globalMeta_ACU.vectorMemoryConfigGlobal[field] = patch[field];
+        });
+        const normalized = normalizeVectorMemoryConfig_ACU(globalMeta_ACU.vectorMemoryConfigGlobal);
+        Object.assign(globalMeta_ACU.vectorMemoryConfigGlobal, normalized);
+        settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+        saveGlobalMeta_ACU();
+        return globalMeta_ACU.vectorMemoryConfigGlobal;
+    }
     function getVectorMemoryNamespace_ACU(chatFileIdentifier) {
         const config = getCurrentVectorMemoryConfig_ACU();
         const chatKey = cleanChatName_ACU(chatFileIdentifier || currentChatFileIdentifier_ACU || 'default');
@@ -5322,6 +5338,63 @@ $CONTENT
                         }
                     });
                 }
+                // ── V2：checkpoint + delta 字段级清理 ──
+                const layer = tagData.tablePersistenceV2;
+                if (layer && typeof layer === 'object' && layer.version === 2) {
+                    let layerChanged = false;
+                    if (layer.checkpoint?.data && typeof layer.checkpoint.data === 'object') {
+                        sheetKeys.forEach(k => {
+                            if (layer.checkpoint.data[k]) {
+                                delete layer.checkpoint.data[k];
+                                layerChanged = true;
+                            }
+                        });
+                    }
+                    if (layer.delta && typeof layer.delta === 'object') {
+                        const delta = layer.delta;
+                        const nextChangedSheets = Array.isArray(delta.changedSheets)
+                            ? delta.changedSheets.filter(k => !sheetKeys.includes(k))
+                            : [];
+                        if (nextChangedSheets.length !== (delta.changedSheets || []).length) {
+                            delta.changedSheets = nextChangedSheets;
+                            layerChanged = true;
+                        }
+                        const nextModifiedKeys = Array.isArray(delta.modifiedKeys)
+                            ? delta.modifiedKeys.filter(k => !sheetKeys.includes(k))
+                            : [];
+                        if (nextModifiedKeys.length !== (delta.modifiedKeys || []).length) {
+                            delta.modifiedKeys = nextModifiedKeys;
+                            layerChanged = true;
+                        }
+                        const nextUpdateGroupKeys = Array.isArray(delta.updateGroupKeys)
+                            ? delta.updateGroupKeys.filter(k => !sheetKeys.includes(k))
+                            : [];
+                        if (nextUpdateGroupKeys.length !== (delta.updateGroupKeys || []).length) {
+                            delta.updateGroupKeys = nextUpdateGroupKeys;
+                            layerChanged = true;
+                        }
+                        if (delta.changesBySheet && typeof delta.changesBySheet === 'object') {
+                            sheetKeys.forEach(k => {
+                                if (delta.changesBySheet[k]) {
+                                    delete delta.changesBySheet[k];
+                                    layerChanged = true;
+                                }
+                            });
+                        }
+                        if (!delta.changedSheets || delta.changedSheets.length === 0 || !hasAnySheetKey(delta.changesBySheet)) {
+                            delete layer.delta;
+                            layerChanged = true;
+                        }
+                    }
+                    const checkpointHasSheets = !!layer.checkpoint?.data && hasAnySheetKey(layer.checkpoint.data);
+                    if (!checkpointHasSheets && !layer.delta) {
+                        delete tagData.tablePersistenceV2;
+                        layerChanged = true;
+                    }
+                    if (layerChanged) {
+                        msgChanged = true;
+                    }
+                }
             });
             if (msgChanged) {
                 msg.TavernDB_ACU_IsolatedData = nextIsolated;
@@ -5578,12 +5651,820 @@ $CONTENT
         return safeClone(container);
     }
 
+    function cloneTableRow_ACU(row) {
+        return Array.isArray(row) ? row.map(cell => cell ?? null) : [];
+    }
+    function normalizeRowId_ACU(value) {
+        if (value === null || value === undefined)
+            return null;
+        const normalized = String(value).trim();
+        return normalized.length > 0 ? normalized : null;
+    }
+    function getRowIdFromRow_ACU(row) {
+        if (!Array.isArray(row))
+            return null;
+        return normalizeRowId_ACU(row[0]);
+    }
+    function getSheetHeader_ACU(sheet) {
+        if (!sheet || !Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]))
+            return null;
+        return cloneTableRow_ACU(sheet.content[0]);
+    }
+    function getDataRowsWithIdentity_ACU(sheet, sheetKey = '') {
+        if (!sheet || !Array.isArray(sheet.content) || sheet.content.length <= 1)
+            return [];
+        const rows = [];
+        for (let rowIndex = 1; rowIndex < sheet.content.length; rowIndex += 1) {
+            const row = sheet.content[rowIndex];
+            if (!Array.isArray(row)) {
+                logWarn_ACU(`[TableDelta] Skip non-array row at ${sheetKey || sheet?.uid || 'unknown'}#${rowIndex}`);
+                continue;
+            }
+            const rowId = getRowIdFromRow_ACU(row);
+            if (!rowId) {
+                logWarn_ACU(`[TableDelta] Skip row without row_id at ${sheetKey || sheet?.uid || 'unknown'}#${rowIndex}`);
+                continue;
+            }
+            rows.push({
+                rowId,
+                rowIndex,
+                row: cloneTableRow_ACU(row),
+            });
+        }
+        return rows;
+    }
+    function buildRowIdentityMap_ACU(sheet, sheetKey = '') {
+        const map = new Map();
+        for (const entry of getDataRowsWithIdentity_ACU(sheet, sheetKey)) {
+            map.set(entry.rowId, entry);
+        }
+        return map;
+    }
+
+    const SHEET_META_EXCLUDED_KEYS_ACU = new Set([
+        'content',
+        'seedRows',
+        '_acu_from_base_state',
+    ]);
+    function cloneJson_ACU$7(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function createStableId_ACU(prefix, isolationKey, targetMessageIndex) {
+        const safeIsolation = String(isolationKey || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+        return `${prefix}_${safeIsolation}_${targetMessageIndex}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    }
+    function stableStringify_ACU$1(value) {
+        if (value === null || typeof value !== 'object')
+            return JSON.stringify(value);
+        if (Array.isArray(value))
+            return `[${value.map(item => stableStringify_ACU$1(item)).join(',')}]`;
+        const obj = value;
+        return `{${Object.keys(obj).sort().map(key => `${JSON.stringify(key)}:${stableStringify_ACU$1(obj[key])}`).join(',')}}`;
+    }
+    function rowsEqual_ACU(a, b) {
+        return stableStringify_ACU$1(a || []) === stableStringify_ACU$1(b || []);
+    }
+    function headersEqual_ACU(before, after) {
+        return rowsEqual_ACU(getSheetHeader_ACU(before), getSheetHeader_ACU(after));
+    }
+    function extractSheetMeta_ACU(sheet) {
+        if (!sheet || typeof sheet !== 'object')
+            return null;
+        const sheetRecord = sheet;
+        const meta = {};
+        Object.keys(sheetRecord).forEach(key => {
+            if (SHEET_META_EXCLUDED_KEYS_ACU.has(key))
+                return;
+            meta[key] = cloneJson_ACU$7(sheetRecord[key]);
+        });
+        return meta;
+    }
+    function metasEqual_ACU(before, after) {
+        return stableStringify_ACU$1(extractSheetMeta_ACU(before)) === stableStringify_ACU$1(extractSheetMeta_ACU(after));
+    }
+    function createSheetDelta_ACU(sheetKey, beforeSheet, afterSheet) {
+        if (!beforeSheet && !afterSheet)
+            return null;
+        if (beforeSheet && !afterSheet) {
+            return {
+                sheetKey,
+                sheetName: beforeSheet.name,
+                rowChanges: [{ op: 'clearSheet' }],
+            };
+        }
+        const rowChanges = [];
+        const beforeRows = buildRowIdentityMap_ACU(beforeSheet, sheetKey);
+        const afterRows = buildRowIdentityMap_ACU(afterSheet, sheetKey);
+        for (const [rowId, beforeEntry] of beforeRows.entries()) {
+            if (!afterRows.has(rowId)) {
+                rowChanges.push({ op: 'delete', rowId, rowIndexHint: beforeEntry.rowIndex });
+            }
+        }
+        for (const afterEntry of getDataRowsWithIdentity_ACU(afterSheet, sheetKey)) {
+            const beforeEntry = beforeRows.get(afterEntry.rowId);
+            if (!beforeEntry || !rowsEqual_ACU(beforeEntry.row, afterEntry.row)) {
+                rowChanges.push({
+                    op: 'upsert',
+                    rowId: afterEntry.rowId,
+                    rowIndexHint: afterEntry.rowIndex,
+                    row: cloneTableRow_ACU(afterEntry.row),
+                });
+            }
+        }
+        const headerChanged = !headersEqual_ACU(beforeSheet, afterSheet);
+        const metaChanged = !metasEqual_ACU(beforeSheet, afterSheet);
+        if (rowChanges.length === 0 && !headerChanged && !metaChanged)
+            return null;
+        const delta = {
+            sheetKey,
+            sheetName: afterSheet?.name || beforeSheet?.name,
+            rowChanges,
+        };
+        if (headerChanged) {
+            const header = getSheetHeader_ACU(afterSheet);
+            if (header)
+                delta.header = header;
+        }
+        if (metaChanged && afterSheet) {
+            const meta = extractSheetMeta_ACU(afterSheet);
+            if (meta)
+                delta.sheetMeta = meta;
+        }
+        return delta;
+    }
+    function createTableDeltaFromBeforeAfter_ACU(options) {
+        const targetSheetKeys = Array.from(new Set((options.targetSheetKeys || []).filter(key => typeof key === 'string' && key.startsWith('sheet_'))));
+        if (targetSheetKeys.length === 0)
+            return null;
+        const changesBySheet = {};
+        const changedSheets = [];
+        for (const sheetKey of targetSheetKeys) {
+            const beforeSheet = options.before?.[sheetKey] || null;
+            const afterSheet = options.after?.[sheetKey] || null;
+            const sheetDelta = createSheetDelta_ACU(sheetKey, beforeSheet, afterSheet);
+            if (!sheetDelta)
+                continue;
+            changesBySheet[sheetKey] = sheetDelta;
+            changedSheets.push(sheetKey);
+        }
+        if (changedSheets.length === 0)
+            return null;
+        return {
+            kind: 'delta',
+            version: 2,
+            deltaId: createStableId_ACU('delta_v2', options.isolationKey, options.targetMessageIndex),
+            createdAt: new Date().toISOString(),
+            isolationKey: options.isolationKey,
+            baseCheckpointId: options.baseCheckpointId,
+            aiFloorHint: options.aiFloorHint,
+            messageIndexHint: options.targetMessageIndex,
+            changedSheets,
+            modifiedKeys: Array.from(new Set(options.modifiedKeys || [])),
+            updateGroupKeys: Array.from(new Set(options.updateGroupKeys || [])),
+            changesBySheet,
+        };
+    }
+
+    function cloneJson_ACU$6(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function createEmptyTableData_ACU$1(base) {
+        const mate = base?.mate
+            ? cloneJson_ACU$6(base.mate)
+            : {
+                type: 'chatSheets',
+                version: 1,
+                updateConfigUiSentinel: -1,
+                globalInjectionConfig: {
+                    readableEntryPlacement: { position: '', depth: 0, order: 0 },
+                    wrapperPlacement: { position: '', depth: 0, order: 0 },
+                },
+            };
+        return { mate };
+    }
+    function cloneTableData_ACU(base) {
+        if (!base || typeof base !== 'object')
+            return createEmptyTableData_ACU$1(base);
+        return cloneJson_ACU$6(base);
+    }
+    function canCreateSheetFromDelta_ACU(delta) {
+        return !!delta.header || !!delta.sheetMeta || delta.rowChanges.some(change => change.op === 'upsert');
+    }
+    function createSheetFromDelta_ACU(sheetKey, delta) {
+        const meta = (delta.sheetMeta || {});
+        const header = delta.header ? cloneTableRow_ACU(delta.header) : ['row_id'];
+        return {
+            uid: String(meta.uid || sheetKey),
+            name: String(meta.name || delta.sheetName || sheetKey),
+            sourceData: cloneJson_ACU$6(meta.sourceData || { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' }),
+            content: [header],
+            updateConfig: cloneJson_ACU$6(meta.updateConfig || { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 }),
+            exportConfig: cloneJson_ACU$6(meta.exportConfig || {
+                enabled: false,
+                splitByRow: false,
+                entryName: '',
+                entryType: '',
+                keywords: '',
+                preventRecursion: false,
+                injectionTemplate: '',
+                extraIndexEnabled: false,
+                extraIndexEntryName: '',
+                extraIndexColumns: [],
+                extraIndexColumnModes: {},
+                extraIndexInjectionTemplate: '',
+                entryPlacement: { position: '', depth: 0, order: 0 },
+                extraIndexPlacement: { position: '', depth: 0, order: 0 },
+                fixedEntryPlacement: { position: '', depth: 0, order: 0 },
+                fixedIndexPlacement: { position: '', depth: 0, order: 0 },
+            }),
+            orderNo: Number.isFinite(meta.orderNo) ? Number(meta.orderNo) : 0,
+        };
+    }
+    function applySheetMeta_ACU(sheet, delta) {
+        const next = cloneJson_ACU$6(sheet);
+        if (delta.sheetMeta && typeof delta.sheetMeta === 'object') {
+            Object.assign(next, cloneJson_ACU$6(delta.sheetMeta));
+        }
+        if (delta.sheetName)
+            next.name = delta.sheetName;
+        if (delta.header) {
+            if (!Array.isArray(next.content))
+                next.content = [];
+            next.content[0] = cloneTableRow_ACU(delta.header);
+        }
+        else if (!Array.isArray(next.content) || !Array.isArray(next.content[0])) {
+            next.content = [getSheetHeader_ACU(sheet) || ['row_id']];
+        }
+        return next;
+    }
+    function removeRowById_ACU(rows, rowId) {
+        return rows.filter(row => row[0] !== rowId).map(row => cloneTableRow_ACU(row));
+    }
+    function resolveInsertIndex_ACU(rowIndexHint, rowCount) {
+        if (!Number.isFinite(rowIndexHint))
+            return rowCount;
+        const contentRowIndex = Math.trunc(Number(rowIndexHint));
+        if (contentRowIndex <= 0)
+            return rowCount;
+        const dataRowIndex = contentRowIndex - 1;
+        return Math.max(0, Math.min(dataRowIndex, rowCount));
+    }
+    function applyRowChanges_ACU(sheet, rowChanges) {
+        let next = cloneJson_ACU$6(sheet);
+        const header = getSheetHeader_ACU(next) || ['row_id'];
+        const rowMap = buildRowIdentityMap_ACU(next, next.uid || next.name);
+        let orderedRows = Array.from(rowMap.values())
+            .sort((a, b) => a.rowIndex - b.rowIndex)
+            .map(entry => cloneTableRow_ACU(entry.row));
+        for (const change of rowChanges) {
+            if (change.op === 'clearSheet') {
+                orderedRows = [];
+                continue;
+            }
+            if (change.op === 'delete') {
+                orderedRows = removeRowById_ACU(orderedRows, change.rowId);
+                continue;
+            }
+            orderedRows = removeRowById_ACU(orderedRows, change.rowId);
+            const insertIndex = resolveInsertIndex_ACU(change.rowIndexHint, orderedRows.length);
+            orderedRows.splice(insertIndex, 0, cloneTableRow_ACU(change.row));
+        }
+        next.content = [header, ...orderedRows.map(row => cloneTableRow_ACU(row))];
+        return next;
+    }
+    function applySheetDelta_ACU(baseSheet, sheetKey, delta) {
+        if (!baseSheet && !canCreateSheetFromDelta_ACU(delta))
+            return null;
+        const initialSheet = baseSheet ? cloneJson_ACU$6(baseSheet) : createSheetFromDelta_ACU(sheetKey, delta);
+        const withMeta = applySheetMeta_ACU(initialSheet, delta);
+        return applyRowChanges_ACU(withMeta, delta.rowChanges || []);
+    }
+    function applyTableDelta_ACU(base, delta) {
+        const next = cloneTableData_ACU(base);
+        if (!delta || delta.kind !== 'delta' || delta.version !== 2 || !delta.changesBySheet)
+            return next;
+        for (const sheetKey of Object.keys(delta.changesBySheet)) {
+            const sheetDelta = delta.changesBySheet[sheetKey];
+            const baseSheet = next[sheetKey] || null;
+            const applied = applySheetDelta_ACU(baseSheet, sheetKey, sheetDelta);
+            if (applied) {
+                next[sheetKey] = applied;
+            }
+        }
+        return next;
+    }
+
+    function safeClone_ACU(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function parseIsolatedContainer_ACU(msg) {
+        const raw = msg?.TavernDB_ACU_IsolatedData;
+        if (!raw)
+            return null;
+        if (typeof raw === 'string') {
+            try {
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                    ? parsed
+                    : null;
+            }
+            catch {
+                return null;
+            }
+        }
+        return typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+    }
+    function hasAnySheetKey_ACU$2(value) {
+        return !!value && typeof value === 'object' && Object.keys(value).some(key => key.startsWith('sheet_'));
+    }
+    function hasMeaningfulIsolatedTagData_ACU(tagData) {
+        if (!tagData || typeof tagData !== 'object')
+            return false;
+        if (hasAnySheetKey_ACU$2(tagData.independentData))
+            return true;
+        if (tagData.tablePersistenceV2?.checkpoint || tagData.tablePersistenceV2?.delta)
+            return true;
+        if (tagData.vectorMemoryState !== undefined)
+            return true;
+        if (tagData.summaryVectorIndexState !== undefined)
+            return true;
+        if (tagData.summaryVectorIndexManifest !== undefined)
+            return true;
+        if (tagData._acu_base_state)
+            return true;
+        return false;
+    }
+    function readTablePersistenceLayerV2_ACU(msg, isolationKey) {
+        const tagData = readIsolatedTagData_ACU(msg, isolationKey);
+        const layer = tagData?.tablePersistenceV2;
+        if (!layer || layer.version !== 2)
+            return null;
+        return layer;
+    }
+    function writeTablePersistenceLayerV2_ACU(msg, isolationKey, layer) {
+        if (!msg)
+            return;
+        const tagData = initIsolatedTagSlot_ACU(msg, isolationKey);
+        tagData.tablePersistenceV2 = safeClone_ACU(layer);
+    }
+    function clearCurrentIsolationLegacyTableSnapshots_ACU(msg, isolationKey, isolationConfig) {
+        if (!msg)
+            return false;
+        let changed = false;
+        const container = parseIsolatedContainer_ACU(msg);
+        if (container && container[isolationKey]) {
+            const nextContainer = safeClone_ACU(container);
+            const tagData = nextContainer[isolationKey];
+            if (tagData?.independentData && hasAnySheetKey_ACU$2(tagData.independentData)) {
+                tagData.independentData = {};
+                changed = true;
+            }
+            if (hasMeaningfulIsolatedTagData_ACU(tagData)) {
+                msg.TavernDB_ACU_IsolatedData = nextContainer;
+            }
+            else {
+                delete nextContainer[isolationKey];
+                if (Object.keys(nextContainer).length === 0) {
+                    delete msg.TavernDB_ACU_IsolatedData;
+                }
+                else {
+                    msg.TavernDB_ACU_IsolatedData = nextContainer;
+                }
+                changed = true;
+            }
+        }
+        if (isLegacyMatchForIsolation_ACU(msg, isolationConfig)) {
+            if (msg.TavernDB_ACU_IndependentData !== undefined) {
+                delete msg.TavernDB_ACU_IndependentData;
+                changed = true;
+            }
+            if (msg.TavernDB_ACU_Data !== undefined) {
+                delete msg.TavernDB_ACU_Data;
+                changed = true;
+            }
+            if (msg.TavernDB_ACU_SummaryData !== undefined) {
+                delete msg.TavernDB_ACU_SummaryData;
+                changed = true;
+            }
+            if (msg.TavernDB_ACU_ModifiedKeys !== undefined) {
+                delete msg.TavernDB_ACU_ModifiedKeys;
+                changed = true;
+            }
+            if (msg.TavernDB_ACU_UpdateGroupKeys !== undefined) {
+                delete msg.TavernDB_ACU_UpdateGroupKeys;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+    function messageHasTablePersistenceV2_ACU(msg, isolationKey) {
+        const layer = readTablePersistenceLayerV2_ACU(msg, isolationKey);
+        return !!(layer?.checkpoint || layer?.delta);
+    }
+    function messageHasLegacyTableSnapshot_ACU(msg, isolationKey, isolationConfig) {
+        const tagData = readIsolatedTagData_ACU(msg, isolationKey);
+        if (hasAnySheetKey_ACU$2(tagData?.independentData))
+            return true;
+        if (!isLegacyMatchForIsolation_ACU(msg, isolationConfig))
+            return false;
+        return hasAnySheetKey_ACU$2(msg?.TavernDB_ACU_IndependentData)
+            || hasAnySheetKey_ACU$2(msg?.TavernDB_ACU_Data)
+            || hasAnySheetKey_ACU$2(msg?.TavernDB_ACU_SummaryData);
+    }
+
+    function cloneJson_ACU$5(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function createEmptyTableData_ACU() {
+        return {
+            mate: {
+                type: 'chatSheets',
+                version: 1,
+                updateConfigUiSentinel: -1,
+                globalInjectionConfig: {
+                    readableEntryPlacement: { position: '', depth: 0, order: 0 },
+                    wrapperPlacement: { position: '', depth: 0, order: 0 },
+                },
+            },
+        };
+    }
+    function isSheetLike_ACU(value) {
+        return !!value && typeof value === 'object' && Array.isArray(value.content);
+    }
+    function shouldAcceptSheet_ACU(sheetKey, sheet, templateSheetKeySet) {
+        if (!sheetKey.startsWith('sheet_'))
+            return false;
+        if (templateSheetKeySet && !templateSheetKeySet.has(sheetKey))
+            return false;
+        return isSheetLike_ACU(sheet);
+    }
+    function mergeIndependentSnapshot_ACU(out, foundSheets, independentData, templateSheetKeySet) {
+        if (!independentData || typeof independentData !== 'object')
+            return;
+        Object.keys(independentData).forEach(sheetKey => {
+            if (foundSheets.has(sheetKey))
+                return;
+            const sheet = independentData[sheetKey];
+            if (!shouldAcceptSheet_ACU(sheetKey, sheet, templateSheetKeySet))
+                return;
+            out[sheetKey] = cloneJson_ACU$5(sheet);
+            foundSheets.add(sheetKey);
+        });
+    }
+    function mergeLegacyContainer_ACU(out, foundSheets, container, options) {
+        if (!container || typeof container !== 'object')
+            return;
+        Object.keys(container).forEach(sheetKey => {
+            if (foundSheets.has(sheetKey))
+                return;
+            const sheet = container[sheetKey];
+            if (!shouldAcceptSheet_ACU(sheetKey, sheet, options.templateSheetKeySet))
+                return;
+            const isSummary = isSummaryOrOutlineTable_ACU(sheet.name || '');
+            if (options.summaryOnly !== isSummary)
+                return;
+            out[sheetKey] = cloneJson_ACU$5(sheet);
+            foundSheets.add(sheetKey);
+        });
+    }
+    function buildLegacyCheckpointFromChat_ACU(chat, options) {
+        const templateSheetKeySet = Array.isArray(options.templateSheetKeys) && options.templateSheetKeys.length > 0
+            ? new Set(options.templateSheetKeys)
+            : undefined;
+        const endIndex = Number.isFinite(options.targetBoundaryMessageIndex)
+            ? Math.min(Math.trunc(Number(options.targetBoundaryMessageIndex)), chat.length - 1)
+            : chat.length - 1;
+        const scanLegacySnapshots = (activeTemplateSheetKeySet) => {
+            const data = createEmptyTableData_ACU();
+            const foundSheets = new Set();
+            const modifiedKeys = new Set();
+            const updateGroupKeys = new Set();
+            let checkpointMessageIndex;
+            for (let i = endIndex; i >= 0; i--) {
+                const message = chat[i];
+                if (!message || message.is_user)
+                    continue;
+                const tagData = readIsolatedTagData_ACU(message, options.isolationKey);
+                if (tagData) {
+                    mergeIndependentSnapshot_ACU(data, foundSheets, tagData.independentData, activeTemplateSheetKeySet);
+                    (tagData.modifiedKeys || []).forEach(key => modifiedKeys.add(key));
+                    (tagData.updateGroupKeys || []).forEach(key => updateGroupKeys.add(key));
+                    if (checkpointMessageIndex === undefined && foundSheets.size > 0)
+                        checkpointMessageIndex = i;
+                }
+                if (!isLegacyMatchForIsolation_ACU(message, options.isolationConfig))
+                    continue;
+                const legacyIndependent = readLegacyIndependentData_ACU(message);
+                mergeIndependentSnapshot_ACU(data, foundSheets, legacyIndependent, activeTemplateSheetKeySet);
+                readModifiedKeys_ACU(message).forEach(key => modifiedKeys.add(key));
+                readUpdateGroupKeys_ACU(message).forEach(key => updateGroupKeys.add(key));
+                mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message), {
+                    templateSheetKeySet: activeTemplateSheetKeySet,
+                    summaryOnly: false,
+                });
+                mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message), {
+                    templateSheetKeySet: activeTemplateSheetKeySet,
+                    summaryOnly: true,
+                });
+                if (checkpointMessageIndex === undefined && foundSheets.size > 0)
+                    checkpointMessageIndex = i;
+            }
+            return { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex };
+        };
+        let scanResult = scanLegacySnapshots(templateSheetKeySet);
+        if (scanResult.foundSheets.size === 0 && templateSheetKeySet) {
+            scanResult = scanLegacySnapshots(undefined);
+        }
+        const { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex } = scanResult;
+        if (foundSheets.size === 0 || checkpointMessageIndex === undefined) {
+            return { checkpoint: null, modifiedKeys: [], updateGroupKeys: [] };
+        }
+        return {
+            checkpoint: {
+                kind: 'checkpoint',
+                version: 2,
+                checkpointId: `legacy-migration-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                createdAt: new Date().toISOString(),
+                source: 'legacy-migration',
+                isolationKey: options.isolationKey,
+                messageIndexHint: checkpointMessageIndex,
+                data,
+            },
+            checkpointMessageIndex,
+            modifiedKeys: Array.from(modifiedKeys).filter(key => foundSheets.has(key)),
+            updateGroupKeys: Array.from(updateGroupKeys).filter(key => foundSheets.has(key)),
+        };
+    }
+    function migrateLegacyCheckpointToMessage_ACU(msg, isolationKey, checkpoint) {
+        const existingLayer = readTablePersistenceLayerV2_ACU(msg, isolationKey);
+        const layer = {
+            version: 2,
+            checkpoint: cloneJson_ACU$5(checkpoint),
+        };
+        if (existingLayer?.delta) {
+            layer.delta = cloneJson_ACU$5(existingLayer.delta);
+        }
+        writeTablePersistenceLayerV2_ACU(msg, isolationKey, layer);
+    }
+    function findFirstWritableAiMessageIndex_ACU(chat, startIndex = 0) {
+        if (!Array.isArray(chat))
+            return -1;
+        const safeStartIndex = Math.max(0, Math.trunc(Number(startIndex) || 0));
+        for (let i = safeStartIndex; i < chat.length; i += 1) {
+            const message = chat[i];
+            if (message && !message.is_user)
+                return i;
+        }
+        return -1;
+    }
+    function hasAnySheetKey_ACU$1(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value)
+            && Object.keys(value).some(key => key.startsWith('sheet_'));
+    }
+    function messageHasCurrentIsolationLocalTableLayer_ACU(message, isolationKey, isolationConfig) {
+        if (!message || message.is_user)
+            return false;
+        const layer = readTablePersistenceLayerV2_ACU(message, isolationKey);
+        if (layer?.checkpoint || layer?.delta)
+            return true;
+        const tagData = readIsolatedTagData_ACU(message, isolationKey);
+        if (hasAnySheetKey_ACU$1(tagData?.independentData))
+            return true;
+        if (Array.isArray(tagData?.modifiedKeys) && tagData.modifiedKeys.length > 0)
+            return true;
+        if (Array.isArray(tagData?.updateGroupKeys) && tagData.updateGroupKeys.length > 0)
+            return true;
+        if (!isLegacyMatchForIsolation_ACU(message, isolationConfig))
+            return false;
+        if (hasAnySheetKey_ACU$1(readLegacyIndependentData_ACU(message)))
+            return true;
+        if (hasAnySheetKey_ACU$1(readLegacyStandardData_ACU(message)))
+            return true;
+        if (hasAnySheetKey_ACU$1(readLegacySummaryData_ACU(message)))
+            return true;
+        if (readModifiedKeys_ACU(message).length > 0)
+            return true;
+        if (readUpdateGroupKeys_ACU(message).length > 0)
+            return true;
+        return false;
+    }
+    function collectCurrentIsolationLocalTableMessageIndices_ACU(chat, isolationKey, isolationConfig) {
+        if (!Array.isArray(chat))
+            return [];
+        const indices = [];
+        for (let i = 0; i < chat.length; i += 1) {
+            if (messageHasCurrentIsolationLocalTableLayer_ACU(chat[i], isolationKey, isolationConfig)) {
+                indices.push(i);
+            }
+        }
+        return indices;
+    }
+    function resolveLegacyCheckpointAnchorMessageIndex_ACU(chat, isolationKey, isolationConfig, retainRecentLayers) {
+        const retainCount = Math.max(0, Math.trunc(Number(retainRecentLayers) || 0));
+        if (retainCount <= 0)
+            return findFirstWritableAiMessageIndex_ACU(chat);
+        const dataMessageIndices = collectCurrentIsolationLocalTableMessageIndices_ACU(chat, isolationKey, isolationConfig)
+            .filter(index => index > 0);
+        if (dataMessageIndices.length <= retainCount)
+            return findFirstWritableAiMessageIndex_ACU(chat);
+        const boundaryIndex = dataMessageIndices[dataMessageIndices.length - retainCount];
+        return findFirstWritableAiMessageIndex_ACU(chat, boundaryIndex);
+    }
+    function createLegacyRootCheckpoint_ACU(checkpoint, rootMessageIndex) {
+        const checkpointId = checkpoint.checkpointId.startsWith('legacy-root-migration-')
+            ? checkpoint.checkpointId
+            : checkpoint.checkpointId.replace(/^legacy-migration-/, 'legacy-root-migration-');
+        return {
+            ...cloneJson_ACU$5(checkpoint),
+            checkpointId,
+            source: 'legacy-migration',
+            messageIndexHint: rootMessageIndex,
+        };
+    }
+    function migrateLegacyCheckpointToRootMessage_ACU(chat, isolationKey, isolationConfig, checkpoint, options = {}) {
+        const anchorMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(chat, isolationKey, isolationConfig, options.retainRecentLayers);
+        if (anchorMessageIndex < 0)
+            return null;
+        const anchorMessage = chat[anchorMessageIndex];
+        if (!anchorMessage || anchorMessage.is_user)
+            return null;
+        const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, anchorMessageIndex);
+        migrateLegacyCheckpointToMessage_ACU(anchorMessage, isolationKey, rootCheckpoint);
+        for (const message of chat) {
+            clearCurrentIsolationLegacyTableSnapshots_ACU(message, isolationKey, isolationConfig);
+        }
+        return { messageIndex: anchorMessageIndex, checkpoint: rootCheckpoint };
+    }
+
+    function cloneJson_ACU$4(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function normalizeEndExclusive_ACU(chat, targetMessageIndexExclusive) {
+        if (!Number.isFinite(targetMessageIndexExclusive))
+            return chat.length;
+        return Math.max(0, Math.min(Math.trunc(Number(targetMessageIndexExclusive)), chat.length));
+    }
+    function hasAnySheet_ACU$1(data) {
+        return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+    }
+    function reconstructTablesFromChatDeltas_ACU(chat, context, options = {}) {
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return { data: null, checkpoint: null, usedLegacyMigration: false, changed: false };
+        }
+        const endExclusive = normalizeEndExclusive_ACU(chat, options.targetMessageIndexExclusive);
+        let data = null;
+        let checkpoint = null;
+        let checkpointMessageIndex;
+        let sawV2 = false;
+        let sawV2Checkpoint = false;
+        let firstV2MessageIndex;
+        for (let i = 0; i < endExclusive; i++) {
+            const message = chat[i];
+            if (!message || message.is_user)
+                continue;
+            const layer = readTablePersistenceLayerV2_ACU(message, context.isolationKey);
+            if (!layer)
+                continue;
+            sawV2 = true;
+            if (firstV2MessageIndex === undefined)
+                firstV2MessageIndex = i;
+            if (layer.checkpoint) {
+                sawV2Checkpoint = true;
+                checkpoint = cloneJson_ACU$4(layer.checkpoint);
+                checkpointMessageIndex = i;
+                data = cloneJson_ACU$4(layer.checkpoint.data);
+            }
+            if (layer.delta) {
+                data = applyTableDelta_ACU(data, layer.delta);
+            }
+        }
+        if (sawV2Checkpoint) {
+            return {
+                data: hasAnySheet_ACU$1(data) ? data : null,
+                checkpoint,
+                checkpointMessageIndex,
+                usedLegacyMigration: false,
+                changed: false,
+            };
+        }
+        if (options.allowLegacyMigration === false) {
+            return {
+                data: hasAnySheet_ACU$1(data) ? data : null,
+                checkpoint: null,
+                usedLegacyMigration: false,
+                changed: false,
+            };
+        }
+        const legacyBoundaryIndex = firstV2MessageIndex === undefined
+            ? endExclusive - 1
+            : firstV2MessageIndex - 1;
+        const legacyResult = buildLegacyCheckpointFromChat_ACU(chat, {
+            isolationKey: context.isolationKey,
+            isolationConfig: context.isolationConfig,
+            templateSheetKeys: context.templateSheetKeys,
+            targetBoundaryMessageIndex: legacyBoundaryIndex,
+        });
+        if (!legacyResult.checkpoint || legacyResult.checkpointMessageIndex === undefined) {
+            return {
+                data: hasAnySheet_ACU$1(data) ? data : null,
+                checkpoint: null,
+                usedLegacyMigration: false,
+                changed: false,
+            };
+        }
+        let changed = false;
+        let migratedCheckpointMessageIndex = legacyResult.checkpointMessageIndex;
+        let migratedCheckpoint = cloneJson_ACU$4(legacyResult.checkpoint);
+        if (options.saveChatAfterMigration !== false) {
+            try {
+                const migrationResult = migrateLegacyCheckpointToRootMessage_ACU(chat, context.isolationKey, context.isolationConfig, legacyResult.checkpoint, { retainRecentLayers: options.retainRecentLayers });
+                if (migrationResult !== null) {
+                    migratedCheckpointMessageIndex = migrationResult.messageIndex;
+                    migratedCheckpoint = cloneJson_ACU$4(migrationResult.checkpoint);
+                    changed = true;
+                }
+            }
+            catch (error) {
+                logWarn_ACU('[TableDeltaMigration] Failed to write legacy root checkpoint:', error);
+            }
+        }
+        data = cloneJson_ACU$4(legacyResult.checkpoint.data);
+        checkpoint = migratedCheckpoint;
+        checkpointMessageIndex = migratedCheckpointMessageIndex;
+        for (let i = legacyResult.checkpointMessageIndex + 1; i < endExclusive; i++) {
+            const message = chat[i];
+            if (!message || message.is_user)
+                continue;
+            const layer = readTablePersistenceLayerV2_ACU(message, context.isolationKey);
+            if (!layer?.delta)
+                continue;
+            data = applyTableDelta_ACU(data, layer.delta);
+        }
+        return {
+            data: hasAnySheet_ACU$1(data) ? data : null,
+            checkpoint,
+            checkpointMessageIndex,
+            usedLegacyMigration: true,
+            changed,
+        };
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // service/table/table-service.ts — 表格数据操作 service 层
     // 从 data/repositories/table-repo.ts 迁入（消除 data 层越权）
     // ═══════════════════════════════════════════════════════════════
+    function cloneTableDataForPersistence_ACU(data) {
+        return data ? JSON.parse(JSON.stringify(data)) : null;
+    }
+    function sheetHasRealRowsForPersistence_ACU(sheet) {
+        return !!sheet && Array.isArray(sheet.content) && sheet.content.length > 1;
+    }
+    function sheetIsMissingOrEmptyForPersistence_ACU(sheet) {
+        return !sheet || !Array.isArray(sheet.content) || sheet.content.length <= 1;
+    }
+    function resolveTargetSheetKeysForPersistence_ACU(targetSheetKeys, beforeData, afterData) {
+        if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
+            return Array.from(new Set(targetSheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_'))));
+        }
+        const keys = new Set();
+        [beforeData, afterData].forEach(data => {
+            if (!data || typeof data !== 'object')
+                return;
+            Object.keys(data).forEach(key => {
+                if (key.startsWith('sheet_'))
+                    keys.add(key);
+            });
+        });
+        return Array.from(keys);
+    }
+    function protectAgainstAccidentalEmptyAfterData_ACU(options) {
+        const { beforeData, afterData, targetSheetKeys, allowClearingTargetSheets } = options;
+        if (allowClearingTargetSheets)
+            return afterData;
+        if (!beforeData || typeof beforeData !== 'object')
+            return afterData;
+        const keysToCheck = resolveTargetSheetKeysForPersistence_ACU(targetSheetKeys, beforeData, afterData);
+        if (keysToCheck.length === 0)
+            return afterData;
+        let protectedAfterData = afterData ? cloneTableDataForPersistence_ACU(afterData) : cloneTableDataForPersistence_ACU(beforeData);
+        let protectedCount = 0;
+        for (const sheetKey of keysToCheck) {
+            const beforeSheet = beforeData[sheetKey];
+            const afterSheet = protectedAfterData[sheetKey];
+            if (!sheetHasRealRowsForPersistence_ACU(beforeSheet))
+                continue;
+            if (!sheetIsMissingOrEmptyForPersistence_ACU(afterSheet))
+                continue;
+            protectedAfterData[sheetKey] = JSON.parse(JSON.stringify(beforeSheet));
+            protectedCount++;
+        }
+        if (protectedCount > 0) {
+            logWarn_ACU(`[TablePersistence] 阻止 ${protectedCount} 张目标表的异常空快照落盘；如需合法清空，请显式传入 allowClearingTargetSheets。`);
+        }
+        return protectedAfterData;
+    }
     async function persistTablesToChatMessage_ACU(options = {}) {
-        const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys = targetSheetKeys, trackAsUpdate = true, } = options;
+        const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys = targetSheetKeys, trackAsUpdate = true, beforeData = undefined, afterData = undefined, allowClearingTargetSheets = false, } = options;
         /**
          * 保存独立表格数据到聊天记录。
          * 返回 { saved: boolean, messageIndex?: number, error?: string }
@@ -5636,7 +6517,7 @@ $CONTENT
         catch (e) {
             logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
         }
-        let isolatedData = cloneIsolatedData_ACU(targetMessage);
+        const isolatedData = cloneIsolatedData_ACU(targetMessage);
         if (!isolatedData[currentIsolationKey]) {
             isolatedData[currentIsolationKey] = {
                 independentData: {},
@@ -5644,8 +6525,8 @@ $CONTENT
                 updateGroupKeys: [],
             };
         }
-        let currentTagData = isolatedData[currentIsolationKey];
-        let independentData = currentTagData.independentData || {};
+        const currentTagData = isolatedData[currentIsolationKey];
+        currentTagData.independentData = {};
         let keysToSave = targetSheetKeys;
         if (!keysToSave) {
             keysToSave = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
@@ -5654,13 +6535,6 @@ $CONTENT
             ? trackingSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)
             : []);
         const actuallyModifiedKeys = keysToSave.filter(sheetKey => trackingKeySet.has(sheetKey));
-        keysToSave.forEach(sheetKey => {
-            const table = currentJsonTableData_ACU[sheetKey];
-            if (table) {
-                independentData[sheetKey] = sanitizeSheetForStorage_ACU(JSON.parse(JSON.stringify(table)));
-            }
-        });
-        currentTagData.independentData = independentData;
         if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
             const existingModifiedKeys = currentTagData.modifiedKeys || [];
             currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...actuallyModifiedKeys])];
@@ -5674,36 +6548,75 @@ $CONTENT
         else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length === 0) {
             logDebug_ACU(`[Merge Update Failed] No tables were modified for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
         }
-        writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
-        writeMessageIdentity_ACU(targetMessage, {
+        const isolationConfig = {
             enabled: settings_ACU.dataIsolationEnabled,
             code: settings_ACU.dataIsolationCode,
+        };
+        const resolvedBeforeData = beforeData !== undefined
+            ? beforeData
+            : reconstructTablesFromChatDeltas_ACU(chat, {
+                isolationKey: currentIsolationKey,
+                isolationConfig,
+            }, {
+                targetMessageIndexExclusive: finalIndex,
+                saveChatAfterMigration: false,
+            }).data;
+        const resolvedAfterDataRaw = afterData !== undefined
+            ? afterData
+            : JSON.parse(JSON.stringify(currentJsonTableData_ACU));
+        const resolvedAfterData = protectAgainstAccidentalEmptyAfterData_ACU({
+            beforeData: resolvedBeforeData,
+            afterData: resolvedAfterDataRaw,
+            targetSheetKeys: Array.isArray(targetSheetKeys) ? targetSheetKeys : null,
+            allowClearingTargetSheets,
         });
-        writeLegacyCompatData_ACU(targetMessage, independentData, currentTagData.modifiedKeys, currentTagData.updateGroupKeys);
-        logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables.`);
-        const legacyStandardData = { mate: { type: 'chatSheets', version: 1 } };
-        const legacySummaryData = { mate: { type: 'chatSheets', version: 1 } };
-        keysToSave.forEach(sheetKey => {
-            const table = currentJsonTableData_ACU[sheetKey];
-            if (table) {
-                if (isSummaryOrOutlineTable_ACU(table.name)) {
-                    legacySummaryData[sheetKey] = sanitizeSheetForStorage_ACU(JSON.parse(JSON.stringify(table)));
-                }
-                else {
-                    legacyStandardData[sheetKey] = sanitizeSheetForStorage_ACU(JSON.parse(JSON.stringify(table)));
-                }
-            }
+        const baseCheckpoint = reconstructTablesFromChatDeltas_ACU(chat, {
+            isolationKey: currentIsolationKey,
+            isolationConfig,
+        }, {
+            targetMessageIndexExclusive: finalIndex + 1,
+            allowLegacyMigration: false,
+            saveChatAfterMigration: false,
+        }).checkpoint;
+        const delta = createTableDeltaFromBeforeAfter_ACU({
+            before: resolvedBeforeData,
+            after: resolvedAfterData,
+            targetSheetKeys: keysToSave,
+            modifiedKeys: trackAsUpdate ? actuallyModifiedKeys : [],
+            updateGroupKeys: trackAsUpdate && actuallyModifiedKeys.length > 0 ? (updateGroupKeys || []) : [],
+            isolationKey: currentIsolationKey,
+            targetMessageIndex: finalIndex,
+            baseCheckpointId: baseCheckpoint?.checkpointId,
         });
-        writeLegacyStandardAndSummary_ACU(targetMessage, legacyStandardData, legacySummaryData);
+        if (delta) {
+            currentTagData.tablePersistenceV2 = {
+                version: 2,
+                delta,
+            };
+        }
+        else {
+            delete currentTagData.tablePersistenceV2;
+        }
+        writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
+        if (delta) {
+            writeTablePersistenceLayerV2_ACU(targetMessage, currentIsolationKey, currentTagData.tablePersistenceV2);
+        }
+        writeMessageIdentity_ACU(targetMessage, isolationConfig);
+        clearCurrentIsolationLegacyTableSnapshots_ACU(targetMessage, currentIsolationKey, isolationConfig);
+        logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables. Delta written: ${!!delta}.`);
         await saveChatToHost_ACU();
         return { saved: true, messageIndex: finalIndex };
     }
-    /**
-     * 保存独立表格数据到聊天记录。
-     * 返回 { saved: boolean, messageIndex?: number, error?: string }
-     * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
-     */
-    async function saveIndependentTableToChatHistory_ACU(targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, _skipPostRefresh = false, trackingSheetKeys = targetSheetKeys) {
+    async function saveIndependentTableToChatHistory_ACU(targetMessageIndexOrOptions = -1, targetSheetKeys = null, updateGroupKeys = null, _skipPostRefresh = false, trackingSheetKeys = targetSheetKeys) {
+        if (typeof targetMessageIndexOrOptions === 'object' && targetMessageIndexOrOptions !== null) {
+            return persistTablesToChatMessage_ACU({
+                trackAsUpdate: true,
+                ...targetMessageIndexOrOptions,
+            });
+        }
+        const targetMessageIndex = typeof targetMessageIndexOrOptions === 'number'
+            ? targetMessageIndexOrOptions
+            : -1;
         return persistTablesToChatMessage_ACU({
             targetMessageIndex,
             targetSheetKeys,
@@ -6818,12 +7731,17 @@ $CONTENT
             logDebug_ACU(`[原生适配器] loadFromChat: 结果=${result.source}, loaded=${result.loaded}`);
             return result;
         }
-        /**
-         * 保存当前数据到聊天消息
-         * 委托给 saveIndependentTableToChatHistory_ACU
-         */
-        async saveToChat(targetSheetKeys, updateGroupKeys) {
-            return saveIndependentTableToChatHistory_ACU(-1, targetSheetKeys ?? null, updateGroupKeys ?? null);
+        async saveToChat(targetSheetKeysOrOptions, updateGroupKeys) {
+            if (targetSheetKeysOrOptions && !Array.isArray(targetSheetKeysOrOptions) && typeof targetSheetKeysOrOptions === 'object') {
+                return saveIndependentTableToChatHistory_ACU({
+                    targetMessageIndex: -1,
+                    ...targetSheetKeysOrOptions,
+                });
+            }
+            const targetSheetKeys = Array.isArray(targetSheetKeysOrOptions)
+                ? targetSheetKeysOrOptions
+                : null;
+            return saveIndependentTableToChatHistory_ACU(-1, targetSheetKeys, updateGroupKeys ?? null);
         }
         /**
          * 获取当前运行时的完整表格数据
@@ -6831,6 +7749,13 @@ $CONTENT
          */
         getCurrentData() {
             return currentJsonTableData_ACU;
+        }
+        /**
+         * 用指定 JSON 快照替换原生模式运行时数据。
+         * 原生模式没有独立引擎，只需要同步全局 JSON 视图。
+         */
+        async replaceCurrentData(data) {
+            _set_currentJsonTableData_ACU(data ? JSON.parse(JSON.stringify(data)) : null);
         }
         /**
          * 应用 AI 返回的编辑指令（DSL 格式）
@@ -8405,7 +9330,7 @@ $CONTENT
                 throw new Error('SyncBridge: SqliteEngine 未初始化');
             }
             // 创建元数据表
-            this.engine.run(META_TABLE_DDL);
+            this._ensureMetaTable();
             // 遍历所有 sheet
             const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
             logDebug_ACU(`[SyncBridge] 开始加载 ${sheetKeys.length} 张表到 SQLite`);
@@ -8435,7 +9360,8 @@ $CONTENT
                 throw new Error('SyncBridge: SqliteEngine 未初始化');
             }
             const result = { mate: originalMate };
-            // 读取元数据
+            // 读取元数据。空数据库也必须有内部元表，避免把正常空状态变成 SQLite 错误日志。
+            this._ensureMetaTable();
             const metaMap = this._loadAllMeta();
             // 遍历所有用户表
             const tableNames = this.engine.getTableNames();
@@ -8468,6 +9394,10 @@ $CONTENT
         // ═══════════════════════════════════════════════════════════════
         // 内部方法
         // ═══════════════════════════════════════════════════════════════
+        /** 确保内部元数据表存在。只创建 _acu_ 系统表，不创建任何用户表。 */
+        _ensureMetaTable() {
+            this.engine.run(META_TABLE_DDL);
+        }
         /** 加载单张 sheet 到 SQLite */
         _loadSheet(sheetKey, sheet) {
             // 生成 DDL
@@ -8486,6 +9416,10 @@ $CONTENT
                         `\n将按位置映射继续加载，多余列数据可能丢失。`);
                 }
             }
+            // loadFromTableData 的语义是用传入 JSON 快照替换 SQLite 中的当前表数据。
+            // 即使调用方复用同一个 engine，或运行环境未完全释放旧 sql.js Database，
+            // 也不能让 CREATE TABLE 因同名用户表已存在而失败。
+            this._dropExistingUserTable(tableName);
             // 建表
             this.engine.run(ddl);
             // 灌入数据
@@ -8503,6 +9437,22 @@ $CONTENT
                 JSON.stringify(sheet.updateConfig || {}),
                 JSON.stringify(sheet.exportConfig || {}),
             ]);
+        }
+        /**
+         * 删除已存在的用户表，保证 loadFromTableData 具备替换式加载语义。
+         * 内部元数据表和非法表名不会走到这里：tableName 来自 DDL 解析，仍做防御性校验。
+         */
+        _dropExistingUserTable(tableName) {
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+                throw new Error(`非法表名: ${tableName}`);
+            }
+            if (tableName.startsWith('_acu_') || tableName.startsWith('sqlite_')) {
+                throw new Error(`拒绝删除内部表: ${tableName}`);
+            }
+            if (this.engine.getTableDDL(tableName) !== null) {
+                logDebug_ACU(`[SyncBridge] 替换加载前删除已存在表: ${tableName}`);
+                this.engine.run(`DROP TABLE ${tableName};`);
+            }
         }
         /** 从 SQLite 导出单张表为 Sheet_ACU */
         _exportSheet(tableName, meta) {
@@ -9064,175 +10014,80 @@ $CONTENT
         });
         return data;
     }
-    async function mergeAllIndependentTables_ACU() {
+    async function mergeAllIndependentTablesWithMeta_ACU() {
         const chat = getChatArray_ACU();
         if (!chat || chat.length === 0) {
             logDebug_ACU('Cannot merge data: Chat history is empty.');
-            return null;
+            return { data: null, usedLegacyMigration: false, changed: false, foundSheetCount: 0 };
         }
-        // [数据隔离核心] 获取当前隔离标签键名
         const currentIsolationKey = getCurrentIsolationKey_ACU();
         logDebug_ACU(`[Merge] Loading data for isolation key: [${currentIsolationKey || '无标签'}]`);
-        // [新增] 聊天级"空白指导表"：一旦存在，本聊天合并/显示顺序都按指导表，不再按模板
-        // 注意：该指导表按隔离标签分槽，因此切换标识时可拥有不同的"参数/表头/顺序总指导"
         const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
         const hasSheetGuide = !!(sheetGuideData && typeof sheetGuideData === 'object' && Object.keys(sheetGuideData).some(k => k.startsWith('sheet_')));
-        // [新增] 获取当前模板/指导表的表格键列表，用于过滤非当前模板的数据
-        // 优先使用指导表（如果存在），否则使用当前模板
-        // 这样可以确保：切换/导入新模板后，只读取当前模板中存在的表格数据
         const templateSheetKeys = (() => {
             if (hasSheetGuide) {
-                // 存在指导表：使用指导表的表格键（指导表已在导入/切换模板时更新）
                 return Object.keys(sheetGuideData).filter(k => k.startsWith('sheet_'));
             }
-            // 不存在指导表：使用当前模板的表格键
             return getTemplateSheetKeys_ACU();
         })();
-        const templateSheetKeySet = new Set(templateSheetKeys);
         logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})`);
-        // 1. [优化] 不使用模板作为基础，动态收集聊天记录中的所有实际数据
-        let mergedData = {};
-        const foundSheets = {};
-        for (let i = chat.length - 1; i >= 0; i--) {
-            const message = chat[i];
-            if (message.is_user)
-                continue;
-            // [优先级1] 检查新版按标签分组存储
-            const tagData = readIsolatedTagData_ACU(message, currentIsolationKey);
-            if (tagData) {
-                const independentData = tagData.independentData || {};
-                const modifiedKeys = tagData.modifiedKeys || [];
-                const updateGroupKeys = tagData.updateGroupKeys || [];
-                Object.keys(independentData).forEach(storedSheetKey => {
-                    // [新增] 只处理当前模板/指导表中存在的表格
-                    if (!templateSheetKeySet.has(storedSheetKey)) {
-                        logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] - not in current template/guide`);
-                        return;
-                    }
-                    if (!foundSheets[storedSheetKey]) {
-                        mergedData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                        foundSheets[storedSheetKey] = true;
-                        // [修复] 如果数据来自基底状态消息（seedGreeting 写入的模板初始数据），
-                        // 在 sheet 上标记 _acu_from_base_state，供 SqlTableService.loadFromChat 区分
-                        // "基底数据"和"AI 真正填写的数据"，避免因基底数据提前建表
-                        if (tagData._acu_base_state === GREETING_LOCAL_BASE_STATE_MARKER_ACU) {
-                            mergedData[storedSheetKey]._acu_from_base_state = true;
-                        }
-                        // 更新表格状态
-                        let wasUpdated = false;
-                        if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                            wasUpdated = updateGroupKeys.includes(storedSheetKey);
-                        }
-                        else if (modifiedKeys.length > 0) {
-                            wasUpdated = modifiedKeys.includes(storedSheetKey);
-                        }
-                        else {
-                            wasUpdated = true;
-                        }
-                        if (wasUpdated) {
-                            if (!independentTableStates_ACU[storedSheetKey]) {
-                                independentTableStates_ACU[storedSheetKey] = {};
-                            }
-                            const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                            independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
-                        }
-                    }
-                });
+        const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
+        const reconstructResult = reconstructTablesFromChatDeltas_ACU(chat, {
+            isolationKey: currentIsolationKey,
+            isolationConfig,
+            templateSheetKeys,
+        }, {
+            allowLegacyMigration: true,
+            saveChatAfterMigration: true,
+            retainRecentLayers: settings_ACU.retainRecentLayers,
+        });
+        let mergedData = reconstructResult.data ? JSON.parse(JSON.stringify(reconstructResult.data)) : {};
+        Object.keys(mergedData).forEach(k => {
+            if (k === 'mate')
+                delete mergedData[k];
+        });
+        const foundCount = Object.keys(mergedData).filter(k => k.startsWith('sheet_')).length;
+        logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history (${reconstructResult.usedLegacyMigration ? 'legacy-migrated' : 'v2'}).`);
+        if (reconstructResult.changed) {
+            try {
+                await saveChatToHost_ACU();
             }
-            // [优先级2] 兼容旧版存储格式 - 严格匹配隔离标签
-            // [数据隔离核心逻辑] 无标签也是标签的一种，严格隔离不同标签的数据
-            const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
-            const isLegacyMatch = isLegacyMatchForIsolation_ACU(message, isolationConfig);
-            if (isLegacyMatch) {
-                // 检查旧版独立数据格式
-                const legacyIndepData = readLegacyIndependentData_ACU(message);
-                if (legacyIndepData) {
-                    const independentData = legacyIndepData;
-                    const modifiedKeys = readModifiedKeys_ACU(message);
-                    const updateGroupKeys = readUpdateGroupKeys_ACU(message);
-                    Object.keys(independentData).forEach(storedSheetKey => {
-                        // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(storedSheetKey)) {
-                            logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] (legacy) - not in current template/guide`);
-                            return;
-                        }
-                        if (!foundSheets[storedSheetKey]) {
-                            mergedData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                            foundSheets[storedSheetKey] = true;
-                            let wasUpdated = false;
-                            if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                                wasUpdated = updateGroupKeys.includes(storedSheetKey);
-                            }
-                            else if (modifiedKeys.length > 0) {
-                                wasUpdated = modifiedKeys.includes(storedSheetKey);
-                            }
-                            else {
-                                wasUpdated = true;
-                            }
-                            if (wasUpdated) {
-                                if (!independentTableStates_ACU[storedSheetKey])
-                                    independentTableStates_ACU[storedSheetKey] = {};
-                                const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                                independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
-                            }
-                        }
-                    });
-                }
-                // 检查旧版标准表/总结表格式
-                const legacyStdData = readLegacyStandardData_ACU(message);
-                if (legacyStdData) {
-                    const standardData = legacyStdData;
-                    Object.keys(standardData).forEach(k => {
-                        // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(k)) {
-                            return;
-                        }
-                        if (k.startsWith('sheet_') && !foundSheets[k] && standardData[k].name && !isSummaryOrOutlineTable_ACU(standardData[k].name)) {
-                            mergedData[k] = JSON.parse(JSON.stringify(standardData[k]));
-                            foundSheets[k] = true;
-                            if (!independentTableStates_ACU[k])
-                                independentTableStates_ACU[k] = {};
-                            const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                            independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
-                        }
-                    });
-                }
-                const legacySumData = readLegacySummaryData_ACU(message);
-                if (legacySumData) {
-                    const summaryData = legacySumData;
-                    Object.keys(summaryData).forEach(k => {
-                        // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(k)) {
-                            return;
-                        }
-                        if (k.startsWith('sheet_') && !foundSheets[k] && summaryData[k].name && isSummaryOrOutlineTable_ACU(summaryData[k].name)) {
-                            mergedData[k] = JSON.parse(JSON.stringify(summaryData[k]));
-                            foundSheets[k] = true;
-                            if (!independentTableStates_ACU[k])
-                                independentTableStates_ACU[k] = {};
-                            const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                            independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
-                        }
-                    });
-                }
+            catch (error) {
+                logWarn_ACU('[TableDeltaMigration] Failed to persist lazy migration checkpoint:', error);
             }
         }
-        const foundCount = Object.keys(foundSheets).length;
-        logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history.`);
-        // 如果没有任何数据：
-        // - 若存在"空白指导表"：优先返回"指导表物化结构"（表头+参数；seedRows 仅保留字段，不默认展开到 content）
-        // - 否则返回 null，让调用方按旧逻辑处理（例如用完整模板结构作为占位符）
+        Object.keys(mergedData).forEach(storedSheetKey => {
+            if (!storedSheetKey.startsWith('sheet_'))
+                return;
+            if (!independentTableStates_ACU[storedSheetKey]) {
+                independentTableStates_ACU[storedSheetKey] = {};
+            }
+            const currentAiFloor = reconstructResult.checkpointMessageIndex !== undefined
+                ? chat.slice(0, reconstructResult.checkpointMessageIndex + 1).filter(m => !m.is_user).length
+                : chat.filter(m => !m.is_user).length;
+            independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
+        });
         if (foundCount <= 0) {
             if (hasSheetGuide) {
-                // 直接物化：仅表头（seedRows 保留在字段中，但不作为"当前对话真实数据行"展示）
                 const base = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
                 const orderedKeys = getSortedSheetKeys_ACU(base);
-                return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(base, orderedKeys));
+                const data = migrateContentNullToRowId(reorderDataBySheetKeys_ACU(base, orderedKeys));
+                return {
+                    data,
+                    usedLegacyMigration: reconstructResult.usedLegacyMigration,
+                    changed: reconstructResult.changed,
+                    checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
+                    foundSheetCount: 0,
+                };
             }
-            return null;
+            return {
+                data: null,
+                usedLegacyMigration: reconstructResult.usedLegacyMigration,
+                changed: reconstructResult.changed,
+                checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
+                foundSheetCount: 0,
+            };
         }
-        // [兼容迁移] 旧版：updateConfig 的 0 表示"沿用UI"；新版：-1 表示"沿用UI"
-        // 注意：聊天记录里保存的是"单表对象"，没有 mate 标记，因此用 updateConfig.uiSentinel 作为表级标记。
         Object.keys(mergedData).forEach(k => {
             if (!k.startsWith('sheet_'))
                 return;
@@ -9241,7 +10096,7 @@ $CONTENT
             if (!uc || typeof uc !== 'object')
                 return;
             if (uc.uiSentinel === -1)
-                return; // 已是新语义
+                return;
             for (const field of ['contextDepth', 'updateFrequency', 'batchSize', 'skipFloors']) {
                 if (Object.prototype.hasOwnProperty.call(uc, field) && uc[field] === 0) {
                     uc[field] = -1;
@@ -9249,10 +10104,6 @@ $CONTENT
             }
             uc.uiSentinel = -1;
         });
-        // [新增] 若存在"空白指导表"，则：
-        // 1) 过滤掉不在指导表里的表（UI/填表只以指导表为准，避免旧表复活）
-        // 2) 对指导表中缺失的表：使用指导表结构作为初始值（seedRows 仅保留字段，不默认展开到 content）
-        // 3) 对于存在历史数据的表：以历史数据为主，但表名/表头/参数/顺序以指导表为准；不把 seedRows 合并进真实数据行
         if (hasSheetGuide) {
             const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
             const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
@@ -9264,7 +10115,6 @@ $CONTENT
                 if (hist && typeof hist === 'object') {
                     const next = JSON.parse(JSON.stringify(hist));
                     next.uid = k;
-                    // 需求4（视觉编辑器改名/改表头/改参数）：合并展示以指导表为准（不影响历史真实数据行，仅覆盖"元信息/表头/参数/顺序"）
                     if (guideSheet?.name)
                         next.name = guideSheet.name;
                     if (guideSheet?.sourceData)
@@ -9273,7 +10123,6 @@ $CONTENT
                         next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
                     if (guideSheet?.exportConfig)
                         next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-                    // 表头：以指导表为准，并对行做简单对齐（pad/truncate）
                     const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
                         ? JSON.parse(JSON.stringify(guideSheet.content[0]))
                         : null;
@@ -9286,18 +10135,15 @@ $CONTENT
                             const row = next.content[r];
                             if (!Array.isArray(row))
                                 continue;
-                            // [修复] 在对齐行长度之前，保留 auto_merged 标签
                             const hasAutoMergedTag = row.length > 0 && row[row.length - 1] === 'auto_merged';
                             if (row.length < targetLen) {
                                 while (row.length < targetLen)
                                     row.push('');
-                                // 如果原本有 auto_merged 标签，在填充后重新添加
                                 if (hasAutoMergedTag && row[row.length - 1] !== 'auto_merged') {
                                     row.push('auto_merged');
                                 }
                             }
                             else if (row.length > targetLen) {
-                                // [修复] 截断时保留 auto_merged 标签
                                 row.splice(targetLen);
                                 if (hasAutoMergedTag) {
                                     row.push('auto_merged');
@@ -9305,28 +10151,65 @@ $CONTENT
                             }
                         }
                     }
-                    // 顺序编号以指导表为准
                     if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU]))
                         next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-                    // 保留 seedRows 字段（不参与实际 content 合并）
                     if (Array.isArray(guideSheet?.seedRows))
                         next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
                     guided[k] = next;
                 }
                 else {
-                    // 无历史数据：直接使用指导表物化结果（不展开 seedRows）
                     if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU]))
                         guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
                 }
             });
             mergedData = guided;
         }
-        // [修复] 合并结果按"用户手动顺序/模板顺序"重排，避免合并过程导致的随机乱序
         const orderedKeys = getSortedSheetKeys_ACU(mergedData);
         mergedData = reorderDataBySheetKeys_ACU(mergedData, orderedKeys);
-        return migrateContentNullToRowId(mergedData);
+        const data = migrateContentNullToRowId(mergedData);
+        return {
+            data,
+            usedLegacyMigration: reconstructResult.usedLegacyMigration,
+            changed: reconstructResult.changed,
+            checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
+            foundSheetCount: foundCount,
+        };
+    }
+    async function mergeAllIndependentTables_ACU() {
+        const result = await mergeAllIndependentTablesWithMeta_ACU();
+        return result.data;
     }
     // [重构] 刷新合并数据并通知前端和更新世界书
+    function getReadableContentStartColumn_ACU(headerRow) {
+        if (!Array.isArray(headerRow) || headerRow.length === 0)
+            return 0;
+        const firstHeader = String(headerRow[0] ?? '').trim().toLowerCase();
+        return firstHeader === 'row_id' ? 1 : 0;
+    }
+    function hasReadableRowCellData_ACU(row, startColumn) {
+        if (!Array.isArray(row))
+            return false;
+        for (let c = Math.max(0, startColumn); c < row.length; c++) {
+            const cell = row[c];
+            if (cell === null || cell === undefined)
+                continue;
+            if (typeof cell === 'string') {
+                if (cell.trim() !== '')
+                    return true;
+            }
+            else if (typeof cell === 'number') {
+                if (!Number.isNaN(cell))
+                    return true;
+            }
+            else if (typeof cell === 'boolean') {
+                return true;
+            }
+            else {
+                return true;
+            }
+        }
+        return false;
+    }
     function formatJsonToReadable_ACU(jsonData) {
         if (!jsonData)
             return { readableText: "数据库为空。", importantPersonsTable: null, summaryTable: null, outlineTable: null };
@@ -9360,20 +10243,24 @@ $CONTENT
                 if (table.exportConfig.injectIntoWorldbook === false)
                     return; // Skip if injection is disabled
             }
+            const content = Array.isArray(table.content) ? table.content : [];
+            const headerRow = Array.isArray(content[0]) ? content[0] : [];
+            const startColumn = getReadableContentStartColumn_ACU(headerRow);
+            const headers = headerRow.slice(startColumn);
+            if (headers.length === 0)
+                return;
+            const rows = content.slice(1).filter((row) => Array.isArray(row));
+            const hasDisplayableRows = rows.some((row) => hasReadableRowCellData_ACU(row, startColumn));
+            if (!hasDisplayableRows)
+                return;
             // All other tables, including '全局数据表', are added to the readable text
             readableText += `# ${table.name}\n\n`;
-            const headers = table.content[0] ? table.content[0].slice(1) : [];
-            if (headers.length > 0) {
-                readableText += `| ${headers.join(' | ')} |\n`;
-                readableText += `|${headers.map(() => '---').join('|')}|\n`;
-            }
-            const rows = table.content.slice(1);
-            if (rows.length > 0) {
-                rows.forEach((row) => {
-                    const rowData = row.slice(1);
-                    readableText += `| ${rowData.join(' | ')} |\n`;
-                });
-            }
+            readableText += `| ${headers.join(' | ')} |\n`;
+            readableText += `|${headers.map(() => '---').join('|')}|\n`;
+            rows.forEach((row) => {
+                const rowData = row.slice(startColumn);
+                readableText += `| ${rowData.join(' | ')} |\n`;
+            });
             readableText += '\n';
         });
         return { readableText, importantPersonsTable, summaryTable, outlineTable };
@@ -9430,6 +10317,30 @@ $CONTENT
         });
         return out;
     }
+    function createTemplateSeedCheckpointLayer_ACU(data, isolationKey, messageIndexHint) {
+        const safeIsolation = String(isolationKey || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const now = new Date().toISOString();
+        return {
+            version: 2,
+            checkpoint: {
+                kind: 'checkpoint',
+                version: 2,
+                checkpointId: `template-seed-${safeIsolation}-${messageIndexHint}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+                createdAt: now,
+                source: 'template-seed',
+                isolationKey,
+                messageIndexHint,
+                data: JSON.parse(JSON.stringify(data)),
+            },
+        };
+    }
+    function writeTemplateSeedCheckpointToMessage_ACU(msg, isolationKey, messageIndexHint, data) {
+        writeTablePersistenceLayerV2_ACU(msg, isolationKey, createTemplateSeedCheckpointLayer_ACU(data, isolationKey, messageIndexHint));
+        clearCurrentIsolationLegacyTableSnapshots_ACU(msg, isolationKey, {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        });
+    }
     async function seedGreetingLocalDataFromTemplate_ACU() {
         try {
             const chat = getChatArray_ACU();
@@ -9453,20 +10364,13 @@ $CONTENT
                 return false;
             const isolationKey = getCurrentIsolationKey_ACU();
             const tagData = initIsolatedTagSlot_ACU(greetingMsg, isolationKey);
-            // 写入 independentData（只写 sheet_，不强制 modifiedKeys）
-            const indep = {};
-            Object.keys(baseData).forEach(k => {
-                if (!k.startsWith('sheet_'))
-                    return;
-                indep[k] = JSON.parse(JSON.stringify(baseData[k]));
-            });
-            tagData.independentData = indep;
-            // 这是一份"基底"，不应被认为是AI更新结果，因此 modifiedKeys 留空
+            // 这是一份"基底"，不应被认为是AI更新结果，因此 modifiedKeys 留空。
+            // 读取源头锁定为 tablePersistenceV2.checkpoint；不要再并行写 legacy-style independentData。
+            tagData.independentData = {};
             tagData.modifiedKeys = [];
             tagData.updateGroupKeys = [];
             tagData._acu_base_state = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
-            // 同步旧格式（兼容老逻辑）
-            writeLegacyCompatData_ACU(greetingMsg, JSON.parse(JSON.stringify(indep)), [], []);
+            writeTemplateSeedCheckpointToMessage_ACU(greetingMsg, isolationKey, firstAiIndex, baseData);
             // 标记幂等
             greetingMsg._acu_local_template_base_state_seeded = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
             // 不在这里做全局注入抑制；
@@ -9543,8 +10447,7 @@ $CONTENT
             tagData.independentData = indep;
             tagData.modifiedKeys = [];
             tagData.updateGroupKeys = [];
-            // 同步旧格式（兼容老逻辑）
-            writeLegacyCompatData_ACU(firstMsg, JSON.parse(JSON.stringify(indep)), [], []);
+            writeTemplateSeedCheckpointToMessage_ACU(firstMsg, isolationKey, firstAiIndex, fullData);
             // 同时更新指导表与聊天级模板快照（确保表头、参数、预设名同步）
             const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateObj, { stripSeedRows: false });
             if (guideData) {
@@ -9856,6 +10759,8 @@ $CONTENT
         constructor() {
             this.mode = 'sqlite';
             this._initialized = false;
+            this.committedSnapshot = null;
+            this.pendingBeforeSnapshot = null;
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
         }
@@ -9870,8 +10775,12 @@ $CONTENT
             try {
                 // 初始化 SQLite 引擎
                 await this.engine.init();
-                // 从聊天消息合并出最新 JSON 快照
-                const mergedData = await mergeAllIndependentTables_ACU();
+                // 从聊天消息合并出最新 JSON 快照，并保留 V2/legacy migration 元信息。
+                // SQL 模式不能只靠 content.length 猜测是否真实数据：旧聊天懒迁移出来的 checkpoint
+                // 可能在表结构/指导表合并后看起来像空壳，但它仍然代表历史快照，必须加载进 SQLite。
+                const mergeResult = await mergeAllIndependentTablesWithMeta_ACU();
+                const mergedData = mergeResult.data;
+                const hasAnyMergedSheet = !!mergedData && Object.keys(mergedData).some(k => k.startsWith('sheet_'));
                 // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
                 // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
                 // 空壳结构不应触发建表——用户可能还要改表结构。
@@ -9889,7 +10798,8 @@ $CONTENT
                         return false;
                     return true;
                 });
-                if (!mergedData || !hasRealDataRows) {
+                const shouldLoadMigratedLegacySnapshot = mergeResult.usedLegacyMigration && hasAnyMergedSheet;
+                if (!mergedData || (!hasRealDataRows && !shouldLoadMigratedLegacySnapshot)) {
                     // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
                     // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
                     // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
@@ -9898,9 +10808,11 @@ $CONTENT
                         // 空壳结构：仍然更新 JSON 视图（前端需要显示表头），但不建 SQLite 表
                         _set_currentJsonTableData_ACU(mergedData);
                         this._buildNameMapper(mergedData);
+                        this._markCommitted(mergedData);
                         logDebug_ACU('[SqlTableService] 检测到空壳结构（仅表头无数据行），引擎已就绪，等待第一次填表时建表');
                     }
                     else {
+                        this._markCommitted(null);
                         logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
                     }
                     this._initialized = true;
@@ -9912,6 +10824,7 @@ $CONTENT
                 _set_currentJsonTableData_ACU(mergedData);
                 // 从所有表的 DDL 构建中英文名称映射器
                 this._buildNameMapper(mergedData);
+                this._markCommitted(mergedData);
                 this._initialized = true;
                 logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
                 return { loaded: true, source: 'merged' };
@@ -9922,21 +10835,30 @@ $CONTENT
                 return { loaded: false, source: 'empty', error: errMsg };
             }
         }
-        /**
-         * 从 SQLite 导出并保存到聊天消息
-         * 1. exportToTableData() 导出最新状态
-         * 2. 更新 currentJsonTableData_ACU
-         * 3. saveIndependentTableToChatHistory_ACU() 写入聊天
-         */
-        async saveToChat(targetSheetKeys, updateGroupKeys) {
+        async saveToChat(targetSheetKeysOrOptions, updateGroupKeys) {
             this._ensureInitialized();
             try {
+                const saveOptions = this._normalizeSaveOptions(targetSheetKeysOrOptions, updateGroupKeys);
                 // 从 SQLite 导出最新数据到 JSON 视图
-                const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-                const exportedData = this.syncBridge.exportToTableData(mate);
-                _set_currentJsonTableData_ACU(exportedData);
-                // 写入聊天消息
-                return saveIndependentTableToChatHistory_ACU(-1, targetSheetKeys ?? null, updateGroupKeys ?? null);
+                const exportedData = this.syncBridge.exportToTableData(this._getCurrentMate());
+                const resolvedData = this._resolveExportedDataForJsonView(exportedData);
+                _set_currentJsonTableData_ACU(resolvedData);
+                const afterData = saveOptions.afterData !== undefined
+                    ? saveOptions.afterData
+                    : resolvedData;
+                const beforeData = saveOptions.beforeData !== undefined
+                    ? saveOptions.beforeData
+                    : this.pendingBeforeSnapshot ?? this.committedSnapshot;
+                const result = await saveIndependentTableToChatHistory_ACU({
+                    ...saveOptions,
+                    targetMessageIndex: saveOptions.targetMessageIndex ?? -1,
+                    beforeData,
+                    afterData,
+                });
+                if (result.saved) {
+                    this._markCommitted(afterData);
+                }
+                return result;
             }
             catch (e) {
                 const errMsg = e?.message || String(e);
@@ -9953,15 +10875,39 @@ $CONTENT
                 return currentJsonTableData_ACU;
             }
             try {
-                const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-                const exportedData = this.syncBridge.exportToTableData(mate);
-                _set_currentJsonTableData_ACU(exportedData);
-                return exportedData;
+                const exportedData = this.syncBridge.exportToTableData(this._getCurrentMate());
+                const resolvedData = this._resolveExportedDataForJsonView(exportedData);
+                _set_currentJsonTableData_ACU(resolvedData);
+                return resolvedData;
             }
             catch (e) {
                 logError_ACU(`[SqlTableService] getCurrentData 失败: ${e?.message}`);
                 return currentJsonTableData_ACU;
             }
+        }
+        /**
+         * 用指定 JSON 快照替换 SQLite 模式当前数据源。
+         * 批处理填表需要让提示词基底与 SQL 执行引擎完全一致；否则 AI 看到的当前数据
+         * 和 INSERT/UPDATE 实际作用的数据库不是同一份状态。
+         */
+        async replaceCurrentData(data) {
+            this.engine.dispose();
+            disposeGlobalNameMapper();
+            this.engine = new SqliteEngine();
+            this.syncBridge = new SyncBridge(this.engine);
+            await this.engine.init();
+            if (data) {
+                const clonedData = this._cloneTableData(data);
+                this.syncBridge.loadFromTableData(clonedData);
+                _set_currentJsonTableData_ACU(clonedData);
+                this._buildNameMapper(clonedData);
+                this._markCommitted(clonedData);
+            }
+            else {
+                _set_currentJsonTableData_ACU(null);
+                this._markCommitted(null);
+            }
+            this._initialized = true;
         }
         /**
          * 应用 AI 返回的 SQL 编辑指令
@@ -9990,6 +10936,8 @@ $CONTENT
                 const structNormalized = normalizeSqlStructure(stmt);
                 return normalizeStatementValues(structNormalized);
             });
+            const hadPendingBeforeMutation = !!this.pendingBeforeSnapshot;
+            this._markMutationStarted();
             try {
                 // 事务执行
                 const result = this.engine.runBatch(statements);
@@ -10006,6 +10954,9 @@ $CONTENT
                 };
             }
             catch (e) {
+                if (!hadPendingBeforeMutation) {
+                    this.pendingBeforeSnapshot = null;
+                }
                 // 事务已回滚，数据保持原样
                 const errMsg = e?.message || String(e);
                 logError_ACU(`[SqlTableService] SQL 执行失败: ${errMsg}`);
@@ -10036,14 +10987,19 @@ $CONTENT
         executeMutation(sql, params) {
             this._ensureInitialized();
             this._ensureTablesFromTemplate();
+            const hadPendingBeforeMutation = !!this.pendingBeforeSnapshot;
             try {
                 // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
                 const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
+                this._markMutationStarted();
                 const result = this.engine.run(normalizedSql, params);
                 this._syncToJson();
                 return { changes: result.changes, errors: [] };
             }
             catch (e) {
+                if (!hadPendingBeforeMutation) {
+                    this.pendingBeforeSnapshot = null;
+                }
                 return { changes: 0, errors: [e?.message || String(e)] };
             }
         }
@@ -10059,6 +11015,57 @@ $CONTENT
         // ═══════════════════════════════════════════════════════════════
         // 内部方法
         // ═══════════════════════════════════════════════════════════════
+        _cloneTableData(data) {
+            return data ? JSON.parse(JSON.stringify(data)) : null;
+        }
+        _markCommitted(data) {
+            this.committedSnapshot = this._cloneTableData(data);
+            this.pendingBeforeSnapshot = null;
+        }
+        _markMutationStarted() {
+            if (!this.pendingBeforeSnapshot) {
+                this.pendingBeforeSnapshot = this._cloneTableData(this.committedSnapshot);
+            }
+        }
+        _normalizeSaveOptions(targetSheetKeysOrOptions, updateGroupKeys) {
+            if (targetSheetKeysOrOptions && !Array.isArray(targetSheetKeysOrOptions) && typeof targetSheetKeysOrOptions === 'object') {
+                return targetSheetKeysOrOptions;
+            }
+            return {
+                targetMessageIndex: -1,
+                targetSheetKeys: Array.isArray(targetSheetKeysOrOptions) ? targetSheetKeysOrOptions : null,
+                updateGroupKeys: updateGroupKeys ?? null,
+            };
+        }
+        _getCurrentMate() {
+            return currentJsonTableData_ACU?.mate || {
+                type: 'acu',
+                version: 1,
+                updateConfigUiSentinel: 0,
+                globalInjectionConfig: {
+                    readableEntryPlacement: { position: '', depth: 0, order: 0 },
+                    wrapperPlacement: { position: '', depth: 0, order: 0 },
+                },
+            };
+        }
+        _hasSheetEntries(data) {
+            return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+        }
+        /**
+         * 解析 SQLite 导出结果在 JSON 视图中的最终形态。
+         *
+         * 新开对话/空壳结构下，SQLite 尚未物化用户表，但 currentJsonTableData_ACU 中已经有
+         * header-only 模板结构供 UI 和提示词使用。此时空库导出会合法返回 mate-only；不能让它
+         * 覆盖仍有业务意义的 JSON 空壳，否则表格会在刷新链路中闪一下后消失。
+         */
+        _resolveExportedDataForJsonView(exportedData) {
+            if (this.engine.getTableNames().length === 0 &&
+                !this._hasSheetEntries(exportedData) &&
+                this._hasSheetEntries(currentJsonTableData_ACU)) {
+                return currentJsonTableData_ACU;
+            }
+            return exportedData;
+        }
         /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
         _buildNameMapper(data) {
             try {
@@ -10086,9 +11093,9 @@ $CONTENT
         /** 同步 SQLite → JSON 视图 */
         _syncToJson() {
             try {
-                const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-                const exportedData = this.syncBridge.exportToTableData(mate);
-                _set_currentJsonTableData_ACU(exportedData);
+                const exportedData = this.syncBridge.exportToTableData(this._getCurrentMate());
+                const resolvedData = this._resolveExportedDataForJsonView(exportedData);
+                _set_currentJsonTableData_ACU(resolvedData);
             }
             catch (e) {
                 logError_ACU(`[SqlTableService] syncToJson 失败: ${e?.message}`);
@@ -14147,7 +15154,9 @@ $CONTENT
                 result.injectOnlyTagNames.forEach((name) => injectOnlyTagNames.add(name));
             }
         });
-        return { aggregated, injectOnlyTagNames };
+        aggregated.aggregated = aggregated;
+        aggregated.injectOnlyTagNames = injectOnlyTagNames;
+        return aggregated;
     }
     function buildAggregatedPlotTagBlocks_ACU(aggregatedTags) {
         if (!(aggregatedTags instanceof Map) || aggregatedTags.size === 0)
@@ -15250,17 +16259,28 @@ $CONTENT
             mergedData = currentJsonTableData_ACU;
         }
         else {
-            // 正常更新时，使用全表合并逻辑从整段聊天记录提取每张表的最新版本
+            // 正常更新时，SQL 模式必须从 provider 取当前数据，避免世界书刷新反向覆盖 SQLite 视图。
             await loadAllChatMessages_ACU();
-            const mergedFromHistory = await mergeAllIndependentTables_ACU();
-            if (mergedFromHistory) {
-                mergedData = mergedFromHistory;
-                // 同步内存中的全局数据，确保后续调用保持一致
-                _set_currentJsonTableData_ACU(mergedFromHistory);
+            if (isSqliteMode()) {
+                try {
+                    mergedData = getStorageProvider().getCurrentData();
+                }
+                catch (e) {
+                    logWarn_ACU(`[Worldbook] SQLite provider getCurrentData failed, fallback to current JSON view: ${e?.message}`);
+                    mergedData = currentJsonTableData_ACU;
+                }
             }
             else {
-                // 如果合并失败，退回到当前内存数据避免中断
-                mergedData = currentJsonTableData_ACU;
+                const mergedFromHistory = await mergeAllIndependentTables_ACU();
+                if (mergedFromHistory) {
+                    mergedData = mergedFromHistory;
+                    // 同步内存中的全局数据，确保后续调用保持一致
+                    _set_currentJsonTableData_ACU(mergedFromHistory);
+                }
+                else {
+                    // 如果合并失败，退回到当前内存数据避免中断
+                    mergedData = currentJsonTableData_ACU;
+                }
             }
         }
         if (!mergedData) {
@@ -15277,29 +16297,11 @@ $CONTENT
                 const content = table?.content;
                 if (!Array.isArray(content) || content.length <= 1)
                     continue;
+                const headerRow = Array.isArray(content[0]) ? content[0] : [];
+                const startColumn = getReadableContentStartColumn_ACU(headerRow);
                 for (let r = 1; r < content.length; r++) {
-                    const row = content[r];
-                    if (!Array.isArray(row))
-                        continue;
-                    for (let c = 1; c < row.length; c++) {
-                        const cell = row[c];
-                        if (cell === null || cell === undefined)
-                            continue;
-                        if (typeof cell === 'string') {
-                            if (cell.trim() !== '')
-                                return true;
-                        }
-                        else if (typeof cell === 'number') {
-                            if (!Number.isNaN(cell))
-                                return true;
-                        }
-                        else if (typeof cell === 'boolean') {
-                            return true;
-                        }
-                        else {
-                            return true;
-                        }
-                    }
+                    if (hasReadableRowCellData_ACU(content[r], startColumn))
+                        return true;
                 }
             }
             return false;
@@ -15738,6 +16740,24 @@ $CONTENT
     async function refreshMergedDataAndNotify_ACU() {
         // 重新加载聊天记录
         await loadAllChatMessages_ACU();
+        // SQL 模式必须以 Storage Provider 为当前数据源。
+        // 直接 merge 后写 currentJsonTableData_ACU 会绕过 SQLite 内存库，导致提示词看到的 JSON
+        // 与后续 SQL applyEdits 操作的数据库不是同一份状态。
+        if (isSqliteMode()) {
+            try {
+                await reloadStorageProvider();
+                const providerData = getStorageProvider().getCurrentData();
+                if (providerData) {
+                    logDebug_ACU('[Refresh] SQLite provider data loaded and synchronized to JSON view.');
+                    await updateReadableLorebookEntry_ACU(true);
+                    logDebug_ACU('Updated worldbook entries with SQLite provider data.');
+                    return { mergedData: currentJsonTableData_ACU, integrityFixed: false };
+                }
+            }
+            catch (e) {
+                logError_ACU(`[Refresh] SQLite provider refresh failed: ${e?.message}`);
+            }
+        }
         // 合并数据 (使用新的独立表合并逻辑)
         let mergedData = await mergeAllIndependentTables_ACU();
         // 当回溯找不到任何表格数据时（mergedData 为 null），
@@ -17459,8 +18479,21 @@ $CONTENT
         }
         return !msgIdentity;
     }
+    function getTablePersistenceLayerV2_ACU(msg, isolationKey) {
+        return msg?.TavernDB_ACU_IsolatedData?.[isolationKey]?.tablePersistenceV2 || null;
+    }
     function hasTableDataInMessage_ACU(msg, options) {
         const { sheetKey, isSummaryTable, isolationKey, settings } = options;
+        const layer = getTablePersistenceLayerV2_ACU(msg, isolationKey);
+        if (layer?.checkpoint?.data?.[sheetKey]) {
+            return true;
+        }
+        if (Array.isArray(layer?.delta?.changedSheets) && layer.delta.changedSheets.includes(sheetKey)) {
+            return true;
+        }
+        if (layer?.delta?.changesBySheet?.[sheetKey]) {
+            return true;
+        }
         if (msg?.TavernDB_ACU_IsolatedData?.[isolationKey]?.independentData?.[sheetKey]) {
             return true;
         }
@@ -17475,6 +18508,12 @@ $CONTENT
     function hasTrackedUpdateInMessage_ACU(msg, options) {
         const { sheetKey, isolationKey, settings } = options;
         const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const layer = getTablePersistenceLayerV2_ACU(msg, isolationKey);
+        const v2ModifiedKeys = Array.isArray(layer?.delta?.modifiedKeys) ? layer.delta.modifiedKeys : [];
+        const v2UpdateGroupKeys = Array.isArray(layer?.delta?.updateGroupKeys) ? layer.delta.updateGroupKeys : [];
+        if (v2UpdateGroupKeys.includes(sheetKey) || v2ModifiedKeys.includes(sheetKey)) {
+            return true;
+        }
         const isolatedModifiedKeys = Array.isArray(tagData?.modifiedKeys) ? tagData.modifiedKeys : [];
         const isolatedUpdateGroupKeys = Array.isArray(tagData?.updateGroupKeys) ? tagData.updateGroupKeys : [];
         if (isolatedUpdateGroupKeys.includes(sheetKey) || isolatedModifiedKeys.includes(sheetKey)) {
@@ -17534,6 +18573,183 @@ $CONTENT
             lastTrackedUpdateAiFloor: countAiMessagesUpToIndex_ACU(chat, lastTrackedUpdateMessageIndex),
             hasAnyData: latestDataMessageIndex !== -1,
             hasTrackedUpdate: lastTrackedUpdateMessageIndex !== -1,
+        };
+    }
+
+    function cloneJson_ACU$3(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function hasAnySheet_ACU(data) {
+        return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+    }
+    function hasAnySheetKey_ACU(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value)
+            && Object.keys(value).some(key => key.startsWith('sheet_'));
+    }
+    function hasMeaningfulTagDataAfterTablePurge_ACU(tagData) {
+        if (!tagData || typeof tagData !== 'object')
+            return false;
+        if (hasAnySheetKey_ACU(tagData.independentData))
+            return true;
+        if (tagData.tablePersistenceV2?.checkpoint || tagData.tablePersistenceV2?.delta)
+            return true;
+        if (Array.isArray(tagData.modifiedKeys) && tagData.modifiedKeys.length > 0)
+            return true;
+        if (Array.isArray(tagData.updateGroupKeys) && tagData.updateGroupKeys.length > 0)
+            return true;
+        if (tagData.vectorMemoryState !== undefined)
+            return true;
+        if (tagData.summaryVectorIndexState !== undefined)
+            return true;
+        if (tagData.summaryVectorIndexManifest !== undefined)
+            return true;
+        if (tagData._acu_base_state !== undefined)
+            return true;
+        return false;
+    }
+    function createRetentionCheckpoint_ACU(data, isolationKey, boundaryMessageIndex) {
+        return {
+            kind: 'checkpoint',
+            version: 2,
+            checkpointId: `retention-rollup-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            createdAt: new Date().toISOString(),
+            source: 'retention-rollup',
+            isolationKey,
+            messageIndexHint: boundaryMessageIndex,
+            data: cloneJson_ACU$3(data),
+        };
+    }
+    function deleteCurrentIsolationTableFields_ACU(msg, isolationKey) {
+        const isolatedData = msg?.TavernDB_ACU_IsolatedData;
+        if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData))
+            return false;
+        if (!Object.prototype.hasOwnProperty.call(isolatedData, isolationKey))
+            return false;
+        const nextContainer = cloneJson_ACU$3(isolatedData);
+        const tagData = nextContainer[isolationKey];
+        if (!tagData || typeof tagData !== 'object')
+            return false;
+        let changed = false;
+        if (tagData.tablePersistenceV2 !== undefined) {
+            delete tagData.tablePersistenceV2;
+            changed = true;
+        }
+        if (tagData.independentData !== undefined && hasAnySheetKey_ACU(tagData.independentData)) {
+            delete tagData.independentData;
+            changed = true;
+        }
+        if (tagData.modifiedKeys !== undefined) {
+            delete tagData.modifiedKeys;
+            changed = true;
+        }
+        if (tagData.updateGroupKeys !== undefined) {
+            delete tagData.updateGroupKeys;
+            changed = true;
+        }
+        if (!changed)
+            return false;
+        if (hasMeaningfulTagDataAfterTablePurge_ACU(tagData)) {
+            nextContainer[isolationKey] = tagData;
+        }
+        else {
+            delete nextContainer[isolationKey];
+        }
+        if (Object.keys(nextContainer).length === 0) {
+            delete msg.TavernDB_ACU_IsolatedData;
+        }
+        else {
+            msg.TavernDB_ACU_IsolatedData = nextContainer;
+        }
+        return true;
+    }
+    function deleteRootLegacyTableFields_ACU(msg, isolationConfig) {
+        if (!isLegacyMatchForIsolation_ACU(msg, isolationConfig))
+            return false;
+        let changed = false;
+        const keysToDelete = [
+            'TavernDB_ACU_Data',
+            'TavernDB_ACU_SummaryData',
+            'TavernDB_ACU_IndependentData',
+            'TavernDB_ACU_ModifiedKeys',
+            'TavernDB_ACU_UpdateGroupKeys',
+            'TavernDB_ACU_Identity',
+        ];
+        for (const key of keysToDelete) {
+            if (Object.prototype.hasOwnProperty.call(msg, key)) {
+                delete msg[key];
+                changed = true;
+            }
+        }
+        return changed;
+    }
+    function purgeTableLayerFromMessage_ACU(msg, isolationKey, isolationConfig) {
+        if (!msg || typeof msg !== 'object')
+            return false;
+        const isolatedChanged = deleteCurrentIsolationTableFields_ACU(msg, isolationKey);
+        const rootChanged = deleteRootLegacyTableFields_ACU(msg, isolationConfig);
+        return isolatedChanged || rootChanged;
+    }
+    function rollupCheckpointBeforePurge_ACU(options) {
+        const chat = options.chat;
+        const retainCount = Math.max(0, Math.trunc(Number(options.retainCount) || 0));
+        if (!Array.isArray(chat) || chat.length === 0 || retainCount <= 0) {
+            return { changed: false, purgedMessageIndices: [] };
+        }
+        const dataMessageIndices = Array.isArray(options.dataMessageIndices)
+            ? options.dataMessageIndices.filter(index => Number.isInteger(index) && index > 0 && index < chat.length)
+            : [];
+        if (dataMessageIndices.length <= retainCount) {
+            return { changed: false, purgedMessageIndices: [] };
+        }
+        const cutoffIndex = dataMessageIndices.length - retainCount;
+        const purgedMessageIndices = dataMessageIndices.slice(0, cutoffIndex);
+        const boundaryMessageIndex = dataMessageIndices[cutoffIndex];
+        const boundaryMessage = chat[boundaryMessageIndex];
+        if (!boundaryMessage || boundaryMessage.is_user) {
+            logWarn_ACU('[TableDeltaRetention] Boundary message is not writable, skip checkpoint rollup.', boundaryMessageIndex);
+            return { changed: false, boundaryMessageIndex, purgedMessageIndices };
+        }
+        let changed = false;
+        const reconstructResult = reconstructTablesFromChatDeltas_ACU(chat, {
+            isolationKey: options.isolationKey,
+            isolationConfig: options.isolationConfig,
+            templateSheetKeys: options.templateSheetKeys,
+        }, {
+            targetMessageIndexExclusive: boundaryMessageIndex,
+            allowLegacyMigration: true,
+            saveChatAfterMigration: true,
+            retainRecentLayers: retainCount,
+        });
+        if (reconstructResult.changed) {
+            changed = true;
+        }
+        let checkpointId;
+        if (hasAnySheet_ACU(reconstructResult.data)) {
+            const existingLayer = readTablePersistenceLayerV2_ACU(boundaryMessage, options.isolationKey);
+            const checkpoint = createRetentionCheckpoint_ACU(reconstructResult.data, options.isolationKey, boundaryMessageIndex);
+            const nextLayer = {
+                version: 2,
+                checkpoint,
+            };
+            if (existingLayer?.delta) {
+                nextLayer.delta = cloneJson_ACU$3(existingLayer.delta);
+            }
+            const tagData = initIsolatedTagSlot_ACU(boundaryMessage, options.isolationKey);
+            tagData.tablePersistenceV2 = nextLayer;
+            checkpointId = checkpoint.checkpointId;
+            changed = true;
+        }
+        for (const messageIndex of purgedMessageIndices) {
+            const msg = chat[messageIndex];
+            if (purgeTableLayerFromMessage_ACU(msg, options.isolationKey, options.isolationConfig)) {
+                changed = true;
+            }
+        }
+        return {
+            changed,
+            boundaryMessageIndex,
+            checkpointId,
+            purgedMessageIndices,
         };
     }
 
@@ -20288,27 +21504,26 @@ $CONTENT
             return;
         }
         logDebug_ACU(`[数据清理] 将清理 ${indicesToPurge.length} 层消息的本地数据（保留最近 ${retainCount} 层）...`);
+        const retentionResult = rollupCheckpointBeforePurge_ACU({
+            chat,
+            isolationKey: getCurrentIsolationKey_ACU(),
+            isolationConfig: settings_ACU,
+            retainCount,
+            dataMessageIndices,
+        });
         let purgedCount = 0;
-        const keysToDelete = [
-            'TavernDB_ACU_Data',
-            'TavernDB_ACU_SummaryData',
-            'TavernDB_ACU_IndependentData',
-            'TavernDB_ACU_ModifiedKeys',
-            'TavernDB_ACU_UpdateGroupKeys',
-            'TavernDB_ACU_IsolatedData',
-            'TavernDB_ACU_Identity',
+        let changed = retentionResult.changed;
+        const plotKeysToDelete = [
             'qrf_plot',
             'qrf_plot_preset',
             'qrf_plot_tasks'
         ];
-        let purgedVectorManifestCount = 0;
         for (const idx of indicesToPurge) {
             const msg = chat[idx];
             if (!msg)
                 continue;
-            purgedVectorManifestCount += await deleteVectorIndexManifestsFromMessage_ACU(msg);
             let modified = false;
-            for (const key of keysToDelete) {
+            for (const key of plotKeysToDelete) {
                 if (Object.prototype.hasOwnProperty.call(msg, key)) {
                     delete msg[key];
                     modified = true;
@@ -20316,12 +21531,13 @@ $CONTENT
             }
             if (modified) {
                 purgedCount++;
+                changed = true;
             }
         }
-        if (purgedCount > 0) {
+        if (changed) {
             try {
                 await saveChatToHost_ACU();
-                logDebug_ACU(`[数据清理] 已清理 ${purgedCount} 层消息的本地数据，已删除 ${purgedVectorManifestCount} 组交火向量索引外置文件引用，聊天记录已保存。`);
+                logDebug_ACU(`[数据清理] 已清理 ${retentionResult.purgedMessageIndices.length} 层表格数据与 ${purgedCount} 层剧情推进数据，boundary=${retentionResult.boundaryMessageIndex ?? 'none'}，聊天记录已保存。`);
             }
             catch (e) {
                 logError_ACU('[数据清理] 保存聊天记录失败:', e);
@@ -20531,7 +21747,7 @@ $CONTENT
                 continue;
             const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
                 ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
-                : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
+                : purgeAllTableDeltaFromMessage_ACU(msg, isolationKey, isolationConfig);
             if (clearsSummaryOrOutline) {
                 const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
                 if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
@@ -20549,6 +21765,60 @@ $CONTENT
         }
         return clearedCount;
     }
+    function purgeAllTableDeltaFromMessage_ACU(msg, isolationKey, isolationConfig) {
+        if (!msg || typeof msg !== 'object')
+            return false;
+        let changed = false;
+        const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const layer = tagData?.tablePersistenceV2;
+        if (layer && typeof layer === 'object' && layer.delta) {
+            delete layer.delta;
+            if (!layer.checkpoint) {
+                delete tagData.tablePersistenceV2;
+            }
+            changed = true;
+        }
+        if (tagData && typeof tagData === 'object') {
+            if (tagData.independentData && Object.keys(tagData.independentData).length > 0) {
+                tagData.independentData = {};
+                changed = true;
+            }
+            if (Array.isArray(tagData.modifiedKeys) && tagData.modifiedKeys.length > 0) {
+                tagData.modifiedKeys = [];
+                changed = true;
+            }
+            if (Array.isArray(tagData.updateGroupKeys) && tagData.updateGroupKeys.length > 0) {
+                tagData.updateGroupKeys = [];
+                changed = true;
+            }
+        }
+        const legacyMatches = isolationConfig.enabled
+            ? msg?.TavernDB_ACU_Identity === isolationConfig.code
+            : !msg?.TavernDB_ACU_Identity;
+        if (legacyMatches) {
+            if (msg?.TavernDB_ACU_IndependentData) {
+                delete msg.TavernDB_ACU_IndependentData;
+                changed = true;
+            }
+            if (msg?.TavernDB_ACU_Data) {
+                delete msg.TavernDB_ACU_Data;
+                changed = true;
+            }
+            if (msg?.TavernDB_ACU_SummaryData) {
+                delete msg.TavernDB_ACU_SummaryData;
+                changed = true;
+            }
+            if (Array.isArray(msg?.TavernDB_ACU_ModifiedKeys) && msg.TavernDB_ACU_ModifiedKeys.length > 0) {
+                msg.TavernDB_ACU_ModifiedKeys = [];
+                changed = true;
+            }
+            if (Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys) && msg.TavernDB_ACU_UpdateGroupKeys.length > 0) {
+                msg.TavernDB_ACU_UpdateGroupKeys = [];
+                changed = true;
+            }
+        }
+        return changed;
+    }
     function purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys) {
         if (!msg || !Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0)
             return false;
@@ -20556,6 +21826,41 @@ $CONTENT
         const isolationKey = getCurrentIsolationKey_ACU();
         const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
         if (tagData && typeof tagData === 'object') {
+            const layer = tagData.tablePersistenceV2;
+            const delta = layer?.delta;
+            if (delta && typeof delta === 'object') {
+                targetSheetKeys.forEach(sheetKey => {
+                    if (delta.changesBySheet?.[sheetKey]) {
+                        delete delta.changesBySheet[sheetKey];
+                        changed = true;
+                    }
+                });
+                if (Array.isArray(delta.changedSheets)) {
+                    const nextChangedSheets = delta.changedSheets.filter((key) => !targetSheetKeys.includes(key));
+                    if (nextChangedSheets.length !== delta.changedSheets.length)
+                        changed = true;
+                    delta.changedSheets = nextChangedSheets;
+                }
+                if (Array.isArray(delta.modifiedKeys)) {
+                    const nextModifiedKeys = delta.modifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+                    if (nextModifiedKeys.length !== delta.modifiedKeys.length)
+                        changed = true;
+                    delta.modifiedKeys = nextModifiedKeys;
+                }
+                if (Array.isArray(delta.updateGroupKeys)) {
+                    const nextUpdateGroupKeys = delta.updateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+                    if (nextUpdateGroupKeys.length !== delta.updateGroupKeys.length)
+                        changed = true;
+                    delta.updateGroupKeys = nextUpdateGroupKeys;
+                }
+                const hasRemainingDeltaSheets = delta.changesBySheet && Object.keys(delta.changesBySheet).length > 0;
+                if (!hasRemainingDeltaSheets && (!Array.isArray(delta.changedSheets) || delta.changedSheets.length === 0)) {
+                    delete layer.delta;
+                    if (!layer.checkpoint) {
+                        delete tagData.tablePersistenceV2;
+                    }
+                }
+            }
             if (tagData.independentData && typeof tagData.independentData === 'object') {
                 targetSheetKeys.forEach(sheetKey => {
                     if (tagData.independentData[sheetKey]) {
@@ -20565,10 +21870,16 @@ $CONTENT
                 });
             }
             if (Array.isArray(tagData.modifiedKeys)) {
-                tagData.modifiedKeys = tagData.modifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+                const nextModifiedKeys = tagData.modifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+                if (nextModifiedKeys.length !== tagData.modifiedKeys.length)
+                    changed = true;
+                tagData.modifiedKeys = nextModifiedKeys;
             }
             if (Array.isArray(tagData.updateGroupKeys)) {
-                tagData.updateGroupKeys = tagData.updateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+                const nextUpdateGroupKeys = tagData.updateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+                if (nextUpdateGroupKeys.length !== tagData.updateGroupKeys.length)
+                    changed = true;
+                tagData.updateGroupKeys = nextUpdateGroupKeys;
             }
         }
         if (msg?.TavernDB_ACU_IndependentData && typeof msg.TavernDB_ACU_IndependentData === 'object') {
@@ -20596,15 +21907,21 @@ $CONTENT
             });
         }
         if (Array.isArray(msg?.TavernDB_ACU_ModifiedKeys)) {
-            msg.TavernDB_ACU_ModifiedKeys = msg.TavernDB_ACU_ModifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+            const nextModifiedKeys = msg.TavernDB_ACU_ModifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+            if (nextModifiedKeys.length !== msg.TavernDB_ACU_ModifiedKeys.length)
+                changed = true;
+            msg.TavernDB_ACU_ModifiedKeys = nextModifiedKeys;
         }
         if (Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys)) {
-            msg.TavernDB_ACU_UpdateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+            const nextUpdateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+            if (nextUpdateGroupKeys.length !== msg.TavernDB_ACU_UpdateGroupKeys.length)
+                changed = true;
+            msg.TavernDB_ACU_UpdateGroupKeys = nextUpdateGroupKeys;
         }
         return changed;
     }
 
-    function cloneJson_ACU(value) {
+    function cloneJson_ACU$2(value) {
         if (value == null)
             return value;
         try {
@@ -20667,7 +21984,7 @@ $CONTENT
         const rows = normalizeRows_ACU(state.rows);
         const chunks = normalizeChunks_ACU(state.chunks);
         const manifest = state.manifest && typeof state.manifest === 'object'
-            ? cloneJson_ACU(state.manifest)
+            ? cloneJson_ACU$2(state.manifest)
             : undefined;
         if (rows.length === 0 && !manifest)
             return null;
@@ -20701,14 +22018,14 @@ $CONTENT
             nextState.backend = 'st-files';
             nextState.status = manifest.status;
             nextState.indexId = manifest.indexId;
-            nextState.manifest = cloneJson_ACU(manifest);
+            nextState.manifest = cloneJson_ACU$2(manifest);
             delete nextState.chunks;
-            tagData.summaryVectorIndexManifest = cloneJson_ACU(manifest);
+            tagData.summaryVectorIndexManifest = cloneJson_ACU$2(manifest);
         }
         else if (nextState.manifest) {
             nextState.backend = 'st-files';
             delete nextState.chunks;
-            tagData.summaryVectorIndexManifest = cloneJson_ACU(nextState.manifest);
+            tagData.summaryVectorIndexManifest = cloneJson_ACU$2(nextState.manifest);
         }
         else {
             tagData.summaryVectorIndexManifest = null;
@@ -20721,7 +22038,7 @@ $CONTENT
         const state = cloneSummaryVectorIndexState_ACU$1(tagData.summaryVectorIndexState);
         const manifest = tagData.summaryVectorIndexManifest;
         if (state && manifest && !state.manifest) {
-            state.manifest = cloneJson_ACU(manifest);
+            state.manifest = cloneJson_ACU$2(manifest);
             state.backend = 'st-files';
             state.status = manifest.status;
             state.indexId = manifest.indexId;
@@ -20740,7 +22057,7 @@ $CONTENT
                 chunkCount: manifest.chunkCount,
                 skippedRowCount: manifest.skippedRowCount,
                 rows: [],
-                manifest: cloneJson_ACU(manifest),
+                manifest: cloneJson_ACU$2(manifest),
             };
         }
         return state;
@@ -23036,6 +24353,7 @@ $CONTENT
             name: taskName,
             enabled: cloned.enabled !== false,
             promptGroup,
+            taskApiPreset: typeof cloned.taskApiPreset === 'string' ? cloned.taskApiPreset : (fallback?.taskApiPreset || ''),
             extractTags: typeof cloned.extractTags === 'string' ? cloned.extractTags : (fallback?.extractTags || ''),
             extractInjectTags: typeof cloned.extractInjectTags === 'string' ? cloned.extractInjectTags : (fallback?.extractInjectTags || ''),
             finalDirectiveTemplate: typeof cloned.finalDirectiveTemplate === 'string' ? cloned.finalDirectiveTemplate : (fallback?.finalDirectiveTemplate || ''),
@@ -24644,6 +25962,9 @@ $CONTENT
         const { summaryKey, endIndex } = prepared;
         if (!summaryKey || accumulatedSummary.length === 0)
             return { mergedRows: 0 };
+        const beforeDataForSave = currentJsonTableData_ACU
+            ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+            : null;
         const table = currentJsonTableData_ACU[summaryKey];
         const originalContent = table.content.slice(1);
         let actualEndIndex = 0;
@@ -24677,7 +25998,14 @@ $CONTENT
             }
         });
         const keysToSave = [summaryKey];
-        await saveIndependentTableToChatHistory_ACU(getLastMessageIndex_ACU(), keysToSave, keysToSave);
+        await saveIndependentTableToChatHistory_ACU({
+            targetMessageIndex: getLastMessageIndex_ACU(),
+            targetSheetKeys: keysToSave,
+            updateGroupKeys: keysToSave,
+            beforeData: beforeDataForSave,
+            afterData: currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null,
+            trackAsUpdate: true,
+        });
         await updateReadableLorebookEntry_ACU(true);
         return { mergedRows: accumulatedSummary.length };
     }
@@ -26504,14 +27832,7 @@ $CONTENT
             logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; storage=${result.storageType}${result.warning ? `; warning=${result.warning}` : ''}${result.error ? `; error=${result.error}` : ''}`);
         };
         const updateVectorMemoryFields_ACU = (patch) => {
-            const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
-            globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
-            settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-            Object.keys(patch).forEach((field) => {
-                globalMeta_ACU.vectorMemoryConfigGlobal[field] = patch[field];
-            });
-            settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-            saveGlobalMeta_ACU();
+            updateGlobalVectorMemoryConfigFields_ACU(patch);
             const result = saveSettingsAndNotify_ACU();
             logVectorMemorySaveResult_ACU(Object.keys(patch), result);
         };
@@ -31133,6 +32454,25 @@ $CONTENT
 
     const summaryVectorIndexArchiveLocks_ACU = new Map();
     const summaryVectorIndexArchivePendingTasks_ACU = new Map();
+    function cloneJson_ACU$1(value) {
+        if (value == null)
+            return value;
+        try {
+            return JSON.parse(JSON.stringify(value));
+        }
+        catch {
+            return value;
+        }
+    }
+    function cloneIsolationTagDataForSummaryVectorWrite_ACU(existingTagData) {
+        const cloned = cloneJson_ACU$1(existingTagData && typeof existingTagData === 'object' ? existingTagData : {}) || {};
+        return {
+            ...cloned,
+            independentData: cloned.independentData && typeof cloned.independentData === 'object' ? cloned.independentData : {},
+            modifiedKeys: Array.isArray(cloned.modifiedKeys) ? [...cloned.modifiedKeys] : [],
+            updateGroupKeys: Array.isArray(cloned.updateGroupKeys) ? [...cloned.updateGroupKeys] : [],
+        };
+    }
     // ============================================================
     // 向量化→防抖归档 pipeline（参考 Engram 数据层 hook 触发模式）
     // 向量化阶段立即执行，归档阶段由向量数据变更触发防抖
@@ -31699,13 +33039,7 @@ $CONTENT
             updateGroupKeys: [],
         };
         const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const nextTagData = {
-            independentData: existingTagData.independentData || {},
-            modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-            updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
+        const nextTagData = cloneIsolationTagDataForSummaryVectorWrite_ACU(existingTagData);
         if (nextState) {
             const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
             const persisted = await persistSummaryVectorIndexSnapshot_ACU({
@@ -31763,13 +33097,7 @@ $CONTENT
         if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest)
             return !!manifest;
         const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const nextTagData = {
-            independentData: existingTagData.independentData || {},
-            modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-            updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
+        const nextTagData = cloneIsolationTagDataForSummaryVectorWrite_ACU(existingTagData);
         assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
         nextIsolatedData[isolationKey] = nextTagData;
         message.TavernDB_ACU_IsolatedData = nextIsolatedData;
@@ -32385,6 +33713,101 @@ $CONTENT
     // ============================================================
     // 核心业务函数
     // ============================================================
+    function cloneTableDataForDelta_ACU(data) {
+        if (!data || typeof data !== 'object')
+            return null;
+        return JSON.parse(JSON.stringify(data));
+    }
+    function hasRealDataRows_ACU(sheet) {
+        const content = sheet?.content;
+        return Array.isArray(content) && content.length > 1;
+    }
+    function isHeaderOnlySheet_ACU(sheet) {
+        const content = sheet?.content;
+        return Array.isArray(content) && content.length <= 1;
+    }
+    function cloneJson_ACU(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function resolveRowIdentityColumnIndex_ACU(header) {
+        if (!Array.isArray(header) || header.length === 0)
+            return 0;
+        const rowIdIndex = header.findIndex((cell) => String(cell ?? '').trim().toLowerCase() === 'row_id');
+        return rowIdIndex >= 0 ? rowIdIndex : 0;
+    }
+    function getRowIdentity_ACU(row, identityColumnIndex) {
+        if (!Array.isArray(row))
+            return null;
+        const value = row[identityColumnIndex];
+        if (value === null || value === undefined)
+            return null;
+        const identity = String(value).trim();
+        return identity ? identity : null;
+    }
+    function mergeSheetContentPreservingBatchRows_ACU(batchSheet, providerSheet) {
+        const batchContent = batchSheet?.content;
+        const providerContent = providerSheet?.content;
+        if (!Array.isArray(providerContent) || providerContent.length <= 1)
+            return null;
+        const batchHeader = Array.isArray(batchContent?.[0]) ? batchContent[0] : null;
+        const providerHeader = Array.isArray(providerContent[0]) ? providerContent[0] : null;
+        const headerToKeep = batchHeader || providerHeader;
+        if (!headerToKeep)
+            return null;
+        const identityColumnIndex = resolveRowIdentityColumnIndex_ACU(headerToKeep);
+        const mergedRows = [];
+        const seenIdentities = new Set();
+        if (Array.isArray(batchContent) && batchContent.length > 1) {
+            for (const row of batchContent.slice(1)) {
+                if (!Array.isArray(row))
+                    continue;
+                const clonedRow = cloneJson_ACU(row);
+                mergedRows.push(clonedRow);
+                const identity = getRowIdentity_ACU(clonedRow, identityColumnIndex);
+                if (identity)
+                    seenIdentities.add(identity);
+            }
+        }
+        for (const row of providerContent.slice(1)) {
+            if (!Array.isArray(row))
+                continue;
+            const identity = getRowIdentity_ACU(row, identityColumnIndex);
+            if (identity && seenIdentities.has(identity))
+                continue;
+            const clonedRow = cloneJson_ACU(row);
+            mergedRows.push(clonedRow);
+            if (identity)
+                seenIdentities.add(identity);
+        }
+        return cloneJson_ACU([headerToKeep, ...mergedRows]);
+    }
+    function mergeProviderRowsIntoBatchSheets_ACU(mergedBatchData, providerCurrentData, batchSheetKeys) {
+        if (!providerCurrentData || typeof providerCurrentData !== 'object')
+            return 0;
+        let patchedCount = 0;
+        for (const sheetKey of batchSheetKeys) {
+            const batchSheet = mergedBatchData[sheetKey];
+            const providerSheet = providerCurrentData[sheetKey];
+            if (!batchSheet || !providerSheet)
+                continue;
+            if (!hasRealDataRows_ACU(providerSheet))
+                continue;
+            const mergedContent = mergeSheetContentPreservingBatchRows_ACU(batchSheet, providerSheet);
+            if (!mergedContent)
+                continue;
+            const originalContent = JSON.stringify(batchSheet.content || []);
+            const nextContent = JSON.stringify(mergedContent);
+            if (originalContent === nextContent)
+                continue;
+            mergedBatchData[sheetKey] = {
+                ...cloneJson_ACU(providerSheet),
+                ...batchSheet,
+                content: mergedContent,
+            };
+            patchedCount++;
+        }
+        return patchedCount;
+    }
     /**
      * 加载批次基础数据：从聊天记录中为每个表格查找最新数据
      * 纯业务逻辑，不涉及任何 UI 操作
@@ -32404,10 +33827,14 @@ $CONTENT
             return;
         if (!mergedSheet || typeof mergedSheet !== 'object')
             return;
-        // 恢复 sourceData（包含 DDL、note 等用户在可视化编辑器中修改的关键配置）
-        if (guideSheet.sourceData)
-            mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-        // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
+        // 恢复指导表/模板的结构配置。历史数据只负责提供行内容与可演进元信息，不应污染当前模板配置。
+        const structuralKeys = ['sourceData', 'updateConfig', 'exportConfig'];
+        for (const key of structuralKeys) {
+            if (Object.prototype.hasOwnProperty.call(guideSheet, key)) {
+                mergedSheet[key] = JSON.parse(JSON.stringify(guideSheet[key]));
+            }
+        }
+        // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的，但不能覆盖历史数据行。
         if (Array.isArray(guideSheet.content) && guideSheet.content.length > 0 &&
             Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
             mergedSheet.content[0] = JSON.parse(JSON.stringify(guideSheet.content[0]));
@@ -32424,67 +33851,27 @@ $CONTENT
                 guideSnapshots[k] = mergedBatchData[k];
             }
         });
-        for (let j = firstMessageIndexOfBatch - 1; j >= 0; j--) {
-            const msg = chatHistory[j];
-            if (msg.is_user)
-                continue;
-            // [优先级1] 新版按标签分组存储
-            if (msg.TavernDB_ACU_IsolatedData && msg.TavernDB_ACU_IsolatedData[batchIsolationKey]) {
-                const tagData = msg.TavernDB_ACU_IsolatedData[batchIsolationKey];
-                const independentData = tagData.independentData || {};
-                Object.keys(independentData).forEach(storedSheetKey => {
-                    if (batchFoundSheets[storedSheetKey] === false && mergedBatchData[storedSheetKey]) {
-                        mergedBatchData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                        restoreGuideStructure(mergedBatchData[storedSheetKey], guideSnapshots[storedSheetKey]);
-                        batchFoundSheets[storedSheetKey] = true;
-                    }
-                });
+        const reconstructed = reconstructTablesFromChatDeltas_ACU(chatHistory, {
+            isolationKey: batchIsolationKey,
+            isolationConfig: {
+                enabled: settings_ACU.dataIsolationEnabled,
+                code: settings_ACU.dataIsolationCode,
+            },
+            templateSheetKeys: batchSheetKeys,
+        }, {
+            targetMessageIndexExclusive: firstMessageIndexOfBatch,
+            saveChatAfterMigration: false,
+            retainRecentLayers: settings_ACU.retainRecentLayers,
+        });
+        const reconstructedData = reconstructed.data || {};
+        batchSheetKeys.forEach(sheetKey => {
+            const reconstructedSheet = reconstructedData[sheetKey];
+            if (reconstructedSheet && mergedBatchData[sheetKey]) {
+                mergedBatchData[sheetKey] = JSON.parse(JSON.stringify(reconstructedSheet));
+                restoreGuideStructure(mergedBatchData[sheetKey], guideSnapshots[sheetKey]);
+                batchFoundSheets[sheetKey] = true;
             }
-            // [优先级2] 兼容旧版存储格式
-            const msgIdentity = msg.TavernDB_ACU_Identity;
-            let isLegacyMatch = false;
-            if (settings_ACU.dataIsolationEnabled) {
-                isLegacyMatch = (msgIdentity === settings_ACU.dataIsolationCode);
-            }
-            else {
-                isLegacyMatch = !msgIdentity;
-            }
-            if (isLegacyMatch) {
-                if (msg.TavernDB_ACU_IndependentData) {
-                    const independentData = msg.TavernDB_ACU_IndependentData;
-                    Object.keys(independentData).forEach(storedSheetKey => {
-                        if (batchFoundSheets[storedSheetKey] === false && mergedBatchData[storedSheetKey]) {
-                            mergedBatchData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
-                            restoreGuideStructure(mergedBatchData[storedSheetKey], guideSnapshots[storedSheetKey]);
-                            batchFoundSheets[storedSheetKey] = true;
-                        }
-                    });
-                }
-                if (msg.TavernDB_ACU_Data) {
-                    const standardData = msg.TavernDB_ACU_Data;
-                    Object.keys(standardData).forEach(k => {
-                        if (k.startsWith('sheet_') && batchFoundSheets[k] === false && mergedBatchData[k]) {
-                            mergedBatchData[k] = JSON.parse(JSON.stringify(standardData[k]));
-                            restoreGuideStructure(mergedBatchData[k], guideSnapshots[k]);
-                            batchFoundSheets[k] = true;
-                        }
-                    });
-                }
-                if (msg.TavernDB_ACU_SummaryData) {
-                    const summaryData = msg.TavernDB_ACU_SummaryData;
-                    Object.keys(summaryData).forEach(k => {
-                        if (k.startsWith('sheet_') && batchFoundSheets[k] === false && mergedBatchData[k]) {
-                            mergedBatchData[k] = JSON.parse(JSON.stringify(summaryData[k]));
-                            restoreGuideStructure(mergedBatchData[k], guideSnapshots[k]);
-                            batchFoundSheets[k] = true;
-                        }
-                    });
-                }
-            }
-            if (Object.values(batchFoundSheets).every(v => v === true)) {
-                break;
-            }
-        }
+        });
         const foundCount = Object.values(batchFoundSheets).filter(v => v === true).length;
         const totalCount = batchSheetKeys.length;
         return { foundCount, totalCount };
@@ -32569,6 +33956,8 @@ $CONTENT
             }
             const SQL_ERROR_MARKER = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
             let lastSqlError = null;
+            let successfulBeforeData = null;
+            let successfulAfterData = null;
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 if (wasStoppedByUser_ACU$1) {
                     return { success: false, modifiedKeys: [], aborted: true };
@@ -32594,6 +33983,7 @@ $CONTENT
                         throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
                     }
                     emitProgress({ phase: 'parsing' });
+                    const attemptBeforeData = cloneTableDataForDelta_ACU(currentJsonTableData_ACU);
                     const parseResult = parseAndApplyTableEdits_ACU(aiResponse, updateMode, isImportMode);
                     let parseSuccess = false;
                     modifiedKeys = [];
@@ -32611,6 +34001,8 @@ $CONTENT
                     // [spv3.6.5] 填表完成后统一强制应用编码索引列特殊锁定（AM序列）
                     // 无论 SQL 模式还是原生模式，都在这里兜底确保编码索引列被强制修正
                     applySpecialIndexSequenceToSummaryTables_ACU(currentJsonTableData_ACU);
+                    successfulBeforeData = attemptBeforeData;
+                    successfulAfterData = cloneTableDataForDelta_ACU(currentJsonTableData_ACU);
                     success = true;
                     break;
                 }
@@ -32668,8 +34060,19 @@ $CONTENT
                                 return keysToTrackAsUpdated.includes(sheetKey);
                             })
                             : updateGroupKeysRaw;
-                        const saveSuccess = await saveIndependentTableToChatHistory_ACU(saveTargetIndex, keysToActuallySave, updateGroupKeysToUse, false, keysToTrackAsUpdated);
-                        if (!saveSuccess) {
+                        if (!successfulBeforeData || !successfulAfterData) {
+                            return { success: false, modifiedKeys, error: '无法捕获填表前后数据库快照，已中止保存以避免生成错误 delta。' };
+                        }
+                        const saveResult = await persistTablesToChatMessage_ACU({
+                            targetMessageIndex: saveTargetIndex,
+                            targetSheetKeys: keysToActuallySave,
+                            updateGroupKeys: updateGroupKeysToUse,
+                            trackingSheetKeys: keysToTrackAsUpdated,
+                            trackAsUpdate: true,
+                            beforeData: successfulBeforeData,
+                            afterData: successfulAfterData,
+                        });
+                        if (!saveResult.saved) {
                             return { success: false, modifiedKeys, error: '无法将更新后的数据库保存到聊天记录。' };
                         }
                     }
@@ -32756,7 +34159,28 @@ $CONTENT
                 const batchIsolationKey = getCurrentIsolationKey_ACU();
                 // 加载历史数据
                 const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
-                _set_currentJsonTableData_ACU(mergedBatchData);
+                if (isSqliteMode()) {
+                    const provider = getStorageProvider();
+                    const providerCurrentDataBeforeReplace = provider.getCurrentData();
+                    const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(mergedBatchData, providerCurrentDataBeforeReplace, batchSheetKeys);
+                    if (patchedCount > 0) {
+                        logWarn_ACU(`[Batch ${batchNumber}] SQLite batch base preserved provider rows for ${patchedCount} sheet(s) before replacing runtime data.`);
+                    }
+                    await provider.replaceCurrentData(mergedBatchData);
+                    const providerCurrentData = provider.getCurrentData();
+                    if (providerCurrentData) {
+                        _set_currentJsonTableData_ACU(providerCurrentData);
+                        logDebug_ACU(`[Batch ${batchNumber}] SQLite provider current data exported to JSON before prompt preparation.`);
+                    }
+                    else {
+                        _set_currentJsonTableData_ACU(mergedBatchData);
+                        logWarn_ACU(`[Batch ${batchNumber}] SQLite provider returned null current data after replace; falling back to merged batch data.`);
+                    }
+                    logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
+                }
+                else {
+                    _set_currentJsonTableData_ACU(mergedBatchData);
+                }
                 logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
                 // 计算上下文范围
                 let sliceStartIndex = firstMessageIndexOfBatch;
@@ -32925,11 +34349,15 @@ $CONTENT
                 const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
                 const groupPromises = chunkKeys.map(gKey => (async () => {
                     const group = updateGroups[gKey];
-                    logDebug_ACU(`[Manual Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetKeys.join(', ')}, apiPreset=(manual-global), chunk=${Math.floor(start / maxConcurrentGroups) + 1}`);
+                    const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
+                    const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
+                    const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
+                    const requestOptions = tableApiPreset ? { tableApiPreset } : null;
+                    logDebug_ACU(`[Manual Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetKeys.join(', ')}, apiPreset=${tableApiPreset || '(manual-global)'}, chunk=${Math.floor(start / maxConcurrentGroups) + 1}`);
                     const batchResult = await processBatch(group.indices, 'manual_independent', {
                         targetSheetKeys: group.sheetKeys,
                         batchSize: group.batchSize,
-                        requestOptions: null,
+                        requestOptions,
                     });
                     return {
                         key: gKey,
@@ -37159,6 +38587,9 @@ $CONTENT
         applySheetOrderNumbers_ACU(orderedData, orderedKeys);
         // [新增] 若开启“编码索引列特殊锁定”，保存时强制按 AM 序列重排
         applySpecialIndexSequenceToSummaryTables_ACU(orderedData);
+        const beforeDataForSave_ACU = currentJsonTableData_ACU
+            ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+            : null;
         // First, apply changes to local variable (使用排序后的数据)
         _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(orderedData)));
         // [修复] 可视化编辑器属于"用户显式修改表结构/表名/顺序"的入口：
@@ -37377,11 +38808,21 @@ $CONTENT
             }
             else {
                 // 2.4 分楼层保存，每层只保存属于该层的表
+                const afterDataForSave_ACU = currentJsonTableData_ACU
+                    ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+                    : null;
                 for (const [indexStr, keys] of Object.entries(bucketByIndex)) {
                     const idx = parseInt(indexStr, 10);
                     if (Number.isNaN(idx))
                         continue;
-                    await saveIndependentTableToChatHistory_ACU(idx, keys, null, true);
+                    await saveIndependentTableToChatHistory_ACU({
+                        targetMessageIndex: idx,
+                        targetSheetKeys: keys,
+                        updateGroupKeys: null,
+                        beforeData: beforeDataForSave_ACU,
+                        afterData: afterDataForSave_ACU,
+                        trackAsUpdate: true,
+                    });
                 }
                 // 2.4.5 [关键] 如果本次在可视化编辑器删除了表格，则此处追溯整个聊天记录做“硬删除”
                 // 说明：saveIndependentTableToChatHistory_ACU 只会覆盖/追加 keys，不会自动移除旧 keys，因此必须额外做一次全局清理。
@@ -39763,8 +41204,291 @@ $CONTENT
         }
     }
 
+    function normalizeErrorMessage_ACU(error) {
+        if (error instanceof Error)
+            return error.message || error.name || '未知错误';
+        if (typeof error === 'string')
+            return error;
+        try {
+            const json = JSON.stringify(error);
+            return json && json !== '{}' ? json : String(error || '未知错误');
+        }
+        catch (_jsonError) {
+            return String(error || '未知错误');
+        }
+    }
+    function isMissingExternalVectorFileError_ACU(message) {
+        const text = String(message || '').toLowerCase();
+        const isVectorFileReadFailure = text.includes('交火向量索引分片读取失败')
+            || text.includes('交火向量索引内容块读取失败');
+        return isVectorFileReadFailure
+            && (text.includes('404') || text.includes('not found') || text.includes('读取失败'));
+    }
+    async function clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU(params) {
+        void params.messageIndex;
+        void params.isolationKey;
+        await deleteVectorIndexCacheByIndex_ACU(params.indexId);
+        await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
+        return false;
+    }
+    async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU(params) {
+        void params.messageIndex;
+        void params.isolationKey;
+        await deleteVectorIndexCacheByIndex_ACU(params.indexId);
+        await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
+        return false;
+    }
+    async function clearAllSummaryVectorIndexCaches_ACU() {
+        await clearVectorIndexTempCache_ACU();
+        await clearSummaryVectorHotCache_ACU();
+    }
+    async function clearSummaryVectorIndexScopeCaches_ACU(scope) {
+        await deleteSummaryVectorHotCacheByScope_ACU(scope);
+        await clearSummaryVectorFlushTasksByScope_ACU(scope);
+    }
+    function isInvalidExternalVectorFileError_ACU(message) {
+        const text = String(message || '').toLowerCase();
+        return text.includes('交火向量索引分片身份不匹配')
+            || text.includes('交火向量索引分片校验失败')
+            || text.includes('交火向量索引内容块身份不匹配')
+            || text.includes('交火向量索引内容块校验失败');
+    }
+    async function preloadSummaryVectorIndexCacheForCurrentChat_ACU() {
+        const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
+        const latestLayer = snapshot?.layers?.[0] || null;
+        const manifest = snapshot?.summaryVectorIndexState?.manifest || null;
+        if (!manifest) {
+            return {
+                success: true,
+                skipped: true,
+                reason: 'no_manifest',
+                chunkCount: 0,
+            };
+        }
+        if (manifest.status !== 'ready') {
+            return {
+                success: true,
+                skipped: true,
+                reason: `manifest_status_${manifest.status || 'unknown'}`,
+                chunkCount: 0,
+                indexId: manifest.indexId,
+            };
+        }
+        try {
+            const chunks = await loadSummaryVectorIndexChunksFromManifest_ACU(manifest, {
+                preferExternalFiles: true,
+            });
+            logDebug_ACU(`[交火向量索引] 当前聊天向量缓存预热完成：indexId=${manifest.indexId}, chunks=${chunks.length}，已从外置文件恢复热缓存。`);
+            return {
+                success: true,
+                skipped: false,
+                chunkCount: chunks.length,
+                indexId: manifest.indexId,
+            };
+        }
+        catch (error) {
+            const message = normalizeErrorMessage_ACU(error);
+            if (isMissingExternalVectorFileError_ACU(message)) {
+                const chatStateCleared = latestLayer
+                    ? await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
+                        messageIndex: latestLayer.messageIndex,
+                        isolationKey: latestLayer.isolationKey,
+                        indexId: manifest.indexId,
+                    })
+                    : false;
+                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已清空对应缓存并保留聊天索引状态:', message);
+                return {
+                    success: true,
+                    skipped: true,
+                    reason: 'external_files_missing_cache_cleared_state_retained',
+                    chunkCount: 0,
+                    indexId: manifest.indexId,
+                    error: message,
+                    cacheCleared: true,
+                    chatStateCleared,
+                };
+            }
+            if (isInvalidExternalVectorFileError_ACU(message)) {
+                const chatStateCleared = latestLayer
+                    ? await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
+                        messageIndex: latestLayer.messageIndex,
+                        isolationKey: latestLayer.isolationKey,
+                        indexId: manifest.indexId,
+                    })
+                    : false;
+                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件校验失败，已清空对应缓存并保留聊天索引状态:', message);
+                return {
+                    success: true,
+                    skipped: true,
+                    reason: 'external_files_invalid_cache_cleared_state_retained',
+                    chunkCount: 0,
+                    indexId: manifest.indexId,
+                    error: message,
+                    cacheCleared: true,
+                    chatStateCleared,
+                };
+            }
+            logWarn_ACU('[交火向量索引] 当前聊天向量缓存预热失败:', message);
+            return {
+                success: false,
+                skipped: false,
+                reason: 'preload_failed',
+                chunkCount: 0,
+                indexId: manifest.indexId,
+                error: message,
+            };
+        }
+    }
+
+    function getCurrentSummaryVectorIndexSourceTableKey_ACU() {
+        const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+            ? currentJsonTableData_ACU
+            : null;
+        if (!tables)
+            return 'summary';
+        return Object.keys(tables).find((key) => {
+            const table = tables[key];
+            return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
+        }) || 'summary';
+    }
+    function collectSummaryVectorIndexCandidateTableKeys_ACU() {
+        const candidateTableKeys = new Set();
+        candidateTableKeys.add(getCurrentSummaryVectorIndexSourceTableKey_ACU());
+        candidateTableKeys.add('summary');
+        const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object' ? currentJsonTableData_ACU : null;
+        if (tables) {
+            for (const key of Object.keys(tables)) {
+                const table = tables[key];
+                if (table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''))) {
+                    candidateTableKeys.add(key);
+                }
+            }
+        }
+        return Array.from(candidateTableKeys.values()).filter(Boolean);
+    }
+    async function tryReadSingleSnapshotBlob_ACU(params) {
+        const namedPath = buildVectorIndexSingleSnapshotFilePath_ACU(params);
+        const unnamedPath = buildVectorIndexSingleSnapshotFilePath_ACU({
+            chatKey: params.chatKey,
+            isolationKey: params.isolationKey,
+            sourceTableKey: params.sourceTableKey,
+        });
+        let loaded = await readVectorIndexJsonFile_ACU(namedPath);
+        if ((!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') && namedPath !== unnamedPath) {
+            loaded = await readVectorIndexJsonFile_ACU(unnamedPath);
+        }
+        if (!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') {
+            const legacyPath = buildLegacyVectorIndexSingleSnapshotFilePath_ACU({
+                chatKey: params.chatKey,
+                isolationKey: params.isolationKey,
+                sourceTableKey: params.sourceTableKey,
+            });
+            if (legacyPath !== namedPath && legacyPath !== unnamedPath) {
+                loaded = await readVectorIndexJsonFile_ACU(legacyPath);
+            }
+        }
+        if (!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot')
+            return null;
+        return loaded.data;
+    }
+    async function recoverSummaryVectorIndexFromExternalSnapshotForCurrentChat_ACU() {
+        const chatKey = String(currentChatFileIdentifier_ACU || '').trim();
+        const isolationKey = String(getCurrentIsolationKey_ACU() || '').trim();
+        if (!chatKey || !isolationKey)
+            return false;
+        const chatName = getCurrentCharacterCardName_ACU();
+        for (const sourceTableKey of collectSummaryVectorIndexCandidateTableKeys_ACU()) {
+            try {
+                const blob = await tryReadSingleSnapshotBlob_ACU({ chatKey, isolationKey, sourceTableKey, chatName });
+                if (!blob)
+                    continue;
+                const manifest = blob.manifest;
+                if (!manifest?.indexId || manifest.status !== 'ready')
+                    continue;
+                const chat = getChatArray_ACU();
+                if (!Array.isArray(chat) || chat.length === 0)
+                    continue;
+                let targetIndex = -1;
+                for (let index = chat.length - 1; index >= 0; index -= 1) {
+                    if (chat[index] && !chat[index].is_user) {
+                        targetIndex = index;
+                        break;
+                    }
+                }
+                if (targetIndex < 0)
+                    continue;
+                const message = chat[targetIndex];
+                const tagData = readIsolatedTagData_ACU(message, isolationKey) || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} };
+                if (tagData.summaryVectorIndexState?.manifest?.indexId)
+                    return false;
+                const rows = Array.isArray(blob.rows) ? blob.rows : [];
+                const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
+                assignSummaryVectorIndexStateToTagData_ACU(tagData, {
+                    manifest,
+                    rows,
+                    chunks,
+                    rowCount: rows.filter((row) => row?.status !== 'removed').length,
+                    chunkCount: chunks.length,
+                    snapshotMessageId: String(manifest.snapshotMessageId || message.mesId || ''),
+                    sourceTableKey: String(manifest.sourceTableKey || sourceTableKey),
+                    sourceTableName: String(manifest.sourceTableName || sourceTableKey),
+                    indexedAt: String(manifest.indexedAt || new Date().toISOString()),
+                    skippedRowCount: 0,
+                });
+                writeIsolatedTagData_ACU(message, isolationKey, tagData);
+                await saveChatToHost_ACU();
+                logDebug_ACU(`[ACU交火向量索引] 已从外部快照自动恢复 state 到消息 #${targetIndex}（indexId=${manifest.indexId}，${rows.length} 行，${chunks.length} 块，sourceTableKey=${sourceTableKey}）`);
+                return true;
+            }
+            catch {
+                // 单个候选表键失败不能阻断后续候选路径恢复。
+            }
+        }
+        return false;
+    }
+    async function deleteCurrentSummaryVectorIndexFromChat_ACU() {
+        const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
+        const chat = getChatArray_ACU();
+        const scopeHints = new Map();
+        let changed = false;
+        if (snapshot?.layers?.length) {
+            for (const layer of snapshot.layers) {
+                const message = chat[layer.messageIndex];
+                if (!message || message.is_user)
+                    continue;
+                const tagData = readIsolatedTagData_ACU(message, layer.isolationKey);
+                if (!tagData)
+                    continue;
+                const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
+                if (manifest) {
+                    const hint = {
+                        chatKey: manifest.chatKey || currentChatFileIdentifier_ACU,
+                        isolationKey: manifest.isolationKey || layer.isolationKey,
+                        sourceTableKey: manifest.sourceTableKey || getCurrentSummaryVectorIndexSourceTableKey_ACU(),
+                    };
+                    scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
+                }
+                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
+                changed = true;
+            }
+        }
+        if (changed) {
+            await saveChatToHost_ACU();
+        }
+        const scopeHintList = Array.from(scopeHints.values());
+        for (const hint of scopeHintList) {
+            await clearSummaryVectorIndexScopeCaches_ACU(hint);
+        }
+        const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: scopeHintList });
+        return changed || gcResult.deletedPaths.length > 0 || gcResult.failedDeletes.length > 0;
+    }
+
     // popup-bindings-data.ts
     // 数据管理标签页事件绑定（数据隔离 + 外部导入 + 模板预设 + 数据管理按钮）
+    function cloneCurrentTableDataForPersist_ACU$1() {
+        return currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null;
+    }
     function formatBytes_ACU(bytes) {
         const value = Math.max(0, Number(bytes) || 0);
         if (value < 1024)
@@ -39778,7 +41502,7 @@ $CONTENT
         // ── 自动恢复：tag data 无 state 时，从外部单文件快照恢复 ──
         if (!snapshot?.summaryVectorIndexState?.manifest) {
             try {
-                const recovered = await tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU();
+                const recovered = await recoverSummaryVectorIndexFromExternalSnapshotForCurrentChat_ACU();
                 if (recovered) {
                     snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
                 }
@@ -39817,140 +41541,6 @@ $CONTENT
      * 恢复成功后会将 state 写回最新非用户消息的 tag data 并保存聊天。
      * 会尝试多种 sourceTableKey 以应对表键变化的情况。
      */
-    async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU() {
-        const chatKey = String(currentChatFileIdentifier_ACU || '').trim();
-        const isolationKey = String(getCurrentIsolationKey_ACU() || '').trim();
-        if (!chatKey || !isolationKey)
-            return false;
-        // 收集候选 sourceTableKey：当前值 + 所有纪要/大纲表键 + 兜底 'summary'
-        const candidateTableKeys = new Set();
-        const currentTableKey = getCurrentSummaryVectorIndexSourceTableKey_ACU();
-        candidateTableKeys.add(currentTableKey);
-        candidateTableKeys.add('summary');
-        const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object' ? currentJsonTableData_ACU : null;
-        if (tables) {
-            for (const key of Object.keys(tables)) {
-                const table = tables[key];
-                if (table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''))) {
-                    candidateTableKeys.add(key);
-                }
-            }
-        }
-        // [spv3.6.8] 获取当前角色名用于恢复时尝试新格式路径
-        const chatName = getCurrentCharacterCardName_ACU();
-        for (const sourceTableKey of candidateTableKeys) {
-            try {
-                // [spv3.6.8] 三层回退：新格式（含角色名）→ spv3.6.7 格式（无角色名）→ 旧版格式（含 isolationKey + sourceTableKey）
-                const namedPath = buildVectorIndexSingleSnapshotFilePath_ACU({ chatKey, isolationKey, sourceTableKey, chatName });
-                const unnamedPath = buildVectorIndexSingleSnapshotFilePath_ACU({ chatKey, isolationKey, sourceTableKey });
-                let loaded = await readVectorIndexJsonFile_ACU(namedPath);
-                // 回退1：spv3.6.7 格式（无角色名前缀）
-                if ((!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') && namedPath !== unnamedPath) {
-                    loaded = await readVectorIndexJsonFile_ACU(unnamedPath);
-                }
-                // 回退2：旧版格式（含 isolationKey + sourceTableKey）
-                if (!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') {
-                    const legacyPath = buildLegacyVectorIndexSingleSnapshotFilePath_ACU({ chatKey, isolationKey, sourceTableKey });
-                    if (legacyPath !== namedPath && legacyPath !== unnamedPath) {
-                        loaded = await readVectorIndexJsonFile_ACU(legacyPath);
-                    }
-                }
-                if (!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot')
-                    continue;
-                const blob = loaded.data;
-                const manifest = blob.manifest;
-                if (!manifest?.indexId || manifest.status !== 'ready')
-                    continue;
-                const chat = getChatArray_ACU();
-                if (!Array.isArray(chat) || chat.length === 0)
-                    continue;
-                // 找到最新的非用户消息
-                let targetIndex = -1;
-                for (let i = chat.length - 1; i >= 0; i--) {
-                    if (chat[i] && !chat[i].is_user) {
-                        targetIndex = i;
-                        break;
-                    }
-                }
-                if (targetIndex < 0)
-                    continue;
-                const message = chat[targetIndex];
-                const tagData = readIsolatedTagData_ACU(message, isolationKey) || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} };
-                if (tagData.summaryVectorIndexState?.manifest?.indexId)
-                    return false; // 已有 state，不覆盖
-                const rows = Array.isArray(blob.rows) ? blob.rows : [];
-                const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-                const recoveredState = {
-                    manifest,
-                    rows,
-                    chunks,
-                    rowCount: rows.filter((r) => r.status !== 'removed').length,
-                    chunkCount: chunks.length,
-                    snapshotMessageId: String(manifest.snapshotMessageId || message.mesId || ''),
-                    sourceTableKey: String(manifest.sourceTableKey || sourceTableKey),
-                    sourceTableName: String(manifest.sourceTableName || sourceTableKey),
-                    indexedAt: String(manifest.indexedAt || new Date().toISOString()),
-                    skippedRowCount: 0,
-                };
-                assignSummaryVectorIndexStateToTagData_ACU(tagData, recoveredState);
-                writeIsolatedTagData_ACU(message, isolationKey, tagData);
-                await saveChatToHost_ACU();
-                console.log(`[ACU交火向量索引] 已从外部快照自动恢复 state 到消息 #${targetIndex}（indexId=${manifest.indexId}，${rows.length} 行，${chunks.length} 块，sourceTableKey=${sourceTableKey}）`);
-                return true;
-            }
-            catch { /* 尝试下一个 sourceTableKey */ }
-        }
-        return false;
-    }
-    function getCurrentSummaryVectorIndexSourceTableKey_ACU() {
-        const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
-            ? currentJsonTableData_ACU
-            : null;
-        if (!tables)
-            return 'summary';
-        return Object.keys(tables).find((key) => {
-            const table = tables[key];
-            return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
-        }) || 'summary';
-    }
-    async function deleteCurrentVectorIndexFromChat_ACU() {
-        const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
-        const chat = getChatArray_ACU();
-        const scopeHints = new Map();
-        let changed = false;
-        if (snapshot?.layers?.length) {
-            for (const layer of snapshot.layers) {
-                const message = chat[layer.messageIndex];
-                if (!message || message.is_user)
-                    continue;
-                const tagData = readIsolatedTagData_ACU(message, layer.isolationKey);
-                if (!tagData)
-                    continue;
-                const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
-                if (manifest) {
-                    const hint = {
-                        chatKey: manifest.chatKey || currentChatFileIdentifier_ACU,
-                        isolationKey: manifest.isolationKey || layer.isolationKey,
-                        sourceTableKey: manifest.sourceTableKey || getCurrentSummaryVectorIndexSourceTableKey_ACU(),
-                    };
-                    scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
-                }
-                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
-                changed = true;
-            }
-        }
-        if (changed) {
-            await saveChatToHost_ACU();
-        }
-        const scopeHintList = Array.from(scopeHints.values());
-        for (const hint of scopeHintList) {
-            await deleteSummaryVectorHotCacheByScope_ACU(hint);
-            await clearSummaryVectorFlushTasksByScope_ACU(hint);
-        }
-        const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: scopeHintList });
-        return changed || gcResult.deletedPaths.length > 0 || gcResult.failedDeletes.length > 0;
-    }
     /**
      * 绑定数据管理标签页的所有事件（数据隔离 + 外部导入 + 模板预设 + 数据管理按钮）
      */
@@ -40040,8 +41630,7 @@ $CONTENT
         }
         if ($vectorIndexClearCacheButton_ACU.length) {
             $vectorIndexClearCacheButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
-                await clearVectorIndexTempCache_ACU();
-                await clearSummaryVectorHotCache_ACU();
+                await clearAllSummaryVectorIndexCaches_ACU();
                 await refreshVectorIndexStatsPanel_ACU();
                 showToastr_ACU('success', '交火模式临时缓存与热缓存已清空。');
             });
@@ -40063,7 +41652,15 @@ $CONTENT
                         return name === '纪要表' || name === '总结表' || name === '总体大纲' || name.includes('纪要') || name.includes('总结');
                     });
                     if (summaryKey) {
-                        await saveIndependentTableToChatHistory_ACU(getLastMessageIndex_ACU(), [summaryKey], [summaryKey]);
+                        const tableDataSnapshot = cloneCurrentTableDataForPersist_ACU$1();
+                        await saveIndependentTableToChatHistory_ACU({
+                            targetMessageIndex: getLastMessageIndex_ACU(),
+                            targetSheetKeys: [summaryKey],
+                            updateGroupKeys: [summaryKey],
+                            beforeData: tableDataSnapshot,
+                            afterData: tableDataSnapshot,
+                            trackAsUpdate: true,
+                        });
                     }
                     const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
                     await refreshVectorIndexStatsPanel_ACU();
@@ -40120,7 +41717,7 @@ $CONTENT
             $vectorIndexDeleteCurrentButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
                 if (!confirm('确定要删除当前交火模式外置向量索引吗？这会删除 /user/files 中的索引分片，并清除聊天记录中的 manifest。'))
                     return;
-                const deleted = await deleteCurrentVectorIndexFromChat_ACU();
+                const deleted = await deleteCurrentSummaryVectorIndexFromChat_ACU();
                 await refreshVectorIndexStatsPanel_ACU();
                 showToastr_ACU(deleted ? 'success' : 'info', deleted ? '当前交火模式索引已删除。' : '当前聊天没有可删除的交火模式索引。');
             });
@@ -46685,134 +48282,6 @@ $CONTENT
         return result.finalMessage;
     }
 
-    function normalizeErrorMessage_ACU(error) {
-        if (error instanceof Error)
-            return error.message || error.name || '未知错误';
-        if (typeof error === 'string')
-            return error;
-        try {
-            const json = JSON.stringify(error);
-            return json && json !== '{}' ? json : String(error || '未知错误');
-        }
-        catch (_jsonError) {
-            return String(error || '未知错误');
-        }
-    }
-    function isMissingExternalVectorFileError_ACU(message) {
-        const text = String(message || '').toLowerCase();
-        const isVectorFileReadFailure = text.includes('交火向量索引分片读取失败')
-            || text.includes('交火向量索引内容块读取失败');
-        return isVectorFileReadFailure
-            && (text.includes('404') || text.includes('not found') || text.includes('读取失败'));
-    }
-    async function clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU(params) {
-        void params.messageIndex;
-        void params.isolationKey;
-        await deleteVectorIndexCacheByIndex_ACU(params.indexId);
-        await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
-        return false;
-    }
-    async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU(params) {
-        void params.messageIndex;
-        void params.isolationKey;
-        await deleteVectorIndexCacheByIndex_ACU(params.indexId);
-        await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
-        return false;
-    }
-    function isInvalidExternalVectorFileError_ACU(message) {
-        const text = String(message || '').toLowerCase();
-        return text.includes('交火向量索引分片身份不匹配')
-            || text.includes('交火向量索引分片校验失败')
-            || text.includes('交火向量索引内容块身份不匹配')
-            || text.includes('交火向量索引内容块校验失败');
-    }
-    async function preloadSummaryVectorIndexCacheForCurrentChat_ACU() {
-        const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
-        const latestLayer = snapshot?.layers?.[0] || null;
-        const manifest = snapshot?.summaryVectorIndexState?.manifest || null;
-        if (!manifest) {
-            return {
-                success: true,
-                skipped: true,
-                reason: 'no_manifest',
-                chunkCount: 0,
-            };
-        }
-        if (manifest.status !== 'ready') {
-            return {
-                success: true,
-                skipped: true,
-                reason: `manifest_status_${manifest.status || 'unknown'}`,
-                chunkCount: 0,
-                indexId: manifest.indexId,
-            };
-        }
-        try {
-            const chunks = await loadSummaryVectorIndexChunksFromManifest_ACU(manifest, {
-                preferExternalFiles: true,
-            });
-            logDebug_ACU(`[交火向量索引] 当前聊天向量缓存预热完成：indexId=${manifest.indexId}, chunks=${chunks.length}，已从外置文件恢复热缓存。`);
-            return {
-                success: true,
-                skipped: false,
-                chunkCount: chunks.length,
-                indexId: manifest.indexId,
-            };
-        }
-        catch (error) {
-            const message = normalizeErrorMessage_ACU(error);
-            if (isMissingExternalVectorFileError_ACU(message)) {
-                const chatStateCleared = latestLayer
-                    ? await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
-                        messageIndex: latestLayer.messageIndex,
-                        isolationKey: latestLayer.isolationKey,
-                        indexId: manifest.indexId,
-                    })
-                    : false;
-                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已清空对应缓存并保留聊天索引状态:', message);
-                return {
-                    success: true,
-                    skipped: true,
-                    reason: 'external_files_missing_cache_cleared_state_retained',
-                    chunkCount: 0,
-                    indexId: manifest.indexId,
-                    error: message,
-                    cacheCleared: true,
-                    chatStateCleared,
-                };
-            }
-            if (isInvalidExternalVectorFileError_ACU(message)) {
-                const chatStateCleared = latestLayer
-                    ? await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
-                        messageIndex: latestLayer.messageIndex,
-                        isolationKey: latestLayer.isolationKey,
-                        indexId: manifest.indexId,
-                    })
-                    : false;
-                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件校验失败，已清空对应缓存并保留聊天索引状态:', message);
-                return {
-                    success: true,
-                    skipped: true,
-                    reason: 'external_files_invalid_cache_cleared_state_retained',
-                    chunkCount: 0,
-                    indexId: manifest.indexId,
-                    error: message,
-                    cacheCleared: true,
-                    chatStateCleared,
-                };
-            }
-            logWarn_ACU('[交火向量索引] 当前聊天向量缓存预热失败:', message);
-            return {
-                success: false,
-                skipped: false,
-                reason: 'preload_failed',
-                chunkCount: 0,
-                indexId: manifest.indexId,
-                error: message,
-            };
-        }
-    }
-
     let lastRuntimeSignature_ACU = '';
     let lastRuntimeAt_ACU = 0;
     const SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU = 8000;
@@ -48133,6 +49602,9 @@ $CONTENT
             ...parseMutationOptions_ACU(options),
         };
     }
+    function cloneCurrentTableDataForPersist_ACU() {
+        return currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null;
+    }
     function assertSqlMutationChanged_ACU(methodName, actionLabel, result) {
         if (result.errors.length > 0) {
             logError_ACU(`${methodName} SQL failed: ${result.errors.join(', ')}`);
@@ -48195,7 +49667,7 @@ $CONTENT
     /**
      * 保存表格到最新楼层并刷新世界书（updateCell / updateRow / insertRow / deleteRow 共享）
      */
-    async function saveToLatestFloorAndRefresh(targetSheetKey, tableName, ctx, methodName, options = { skipChatSave: false, skipNotify: false }) {
+    async function saveToLatestFloorAndRefresh(targetSheetKey, tableName, ctx, methodName, options = { skipChatSave: false, skipNotify: false }, beforeData = null) {
         const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, tableName);
         let didNotifyThroughRefresh = false;
         if (tableLatestFloorIndex !== -1) {
@@ -48209,7 +49681,14 @@ $CONTENT
                     settings: settings_ACU,
                 });
                 const shouldTrackAsUpdate = history.latestDataMessageIndex === -1;
-                await saveIndependentTableToChatHistory_ACU(tableLatestFloorIndex, [targetSheetKey], shouldTrackAsUpdate ? [targetSheetKey] : null, true);
+                await saveIndependentTableToChatHistory_ACU({
+                    targetMessageIndex: tableLatestFloorIndex,
+                    targetSheetKeys: [targetSheetKey],
+                    updateGroupKeys: shouldTrackAsUpdate ? [targetSheetKey] : null,
+                    beforeData,
+                    afterData: cloneCurrentTableDataForPersist_ACU(),
+                    trackAsUpdate: true,
+                });
             }
             await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify });
             didNotifyThroughRefresh = !options.skipNotify;
@@ -48280,6 +49759,7 @@ $CONTENT
                         logError_ACU(`updateCell: Row index ${normalizedRowIndex} out of bounds in table "${tableName}".`);
                         return false;
                     }
+                    const beforeData = cloneCurrentTableDataForPersist_ACU();
                     if (isSqliteMode()) {
                         // SQLite 模式：用英文物理表名和英文列名生成 UPDATE SQL；值统一走参数绑定，避免 row_id/单元格值字符串破坏 SQL。
                         const rowId = targetSheet.content[normalizedRowIndex][0]; // row_id 是第一列
@@ -48314,7 +49794,7 @@ $CONTENT
                         targetSheet.content[normalizedRowIndex][colIndex] = normalizedValue;
                         logDebug_ACU(`updateCell: Updated [${tableName}] row ${normalizedRowIndex}, col ${normalizedColIdentifier} = ${normalizedValue}`);
                     }
-                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateCell', { skipChatSave, skipNotify });
+                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateCell', { skipChatSave, skipNotify }, beforeData);
                     return true;
                 }
                 catch (e) {
@@ -48342,6 +49822,7 @@ $CONTENT
                         return false;
                     }
                     const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
+                    const beforeData = cloneCurrentTableDataForPersist_ACU();
                     if (isSqliteMode()) {
                         // SQLite 模式：用英文物理表名和英文列名生成 UPDATE SQL
                         const rowId = targetSheet.content[normalizedRowIndex]?.[0];
@@ -48406,7 +49887,7 @@ $CONTENT
                         }
                         logDebug_ACU(`updateRow: Updated ${updated} cells in [${tableName}] row ${normalizedRowIndex}`);
                     }
-                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateRow', { skipChatSave, skipNotify });
+                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateRow', { skipChatSave, skipNotify }, beforeData);
                     return true;
                 }
                 catch (e) {
@@ -48431,6 +49912,7 @@ $CONTENT
                     }
                     const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
                     const headers = targetSheet.content[0] || [];
+                    const beforeData = cloneCurrentTableDataForPersist_ACU();
                     if (isSqliteMode()) {
                         // SQLite 模式：用英文物理表名和英文列名生成 INSERT SQL
                         const beforeLength = targetSheet.content.length;
@@ -48462,7 +49944,7 @@ $CONTENT
                         }
                         const newIndex = refreshedLength - 1;
                         logDebug_ACU(`insertRow: [SQLite] Inserted row in [${englishTableName}] at index ${newIndex}`);
-                        await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify });
+                        await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify }, beforeData);
                         return newIndex;
                     }
                     else {
@@ -48478,7 +49960,7 @@ $CONTENT
                         targetSheet.content.push(newRow);
                         const newIndex = targetSheet.content.length - 1;
                         logDebug_ACU(`insertRow: Inserted row at index ${newIndex} in [${tableName}]`);
-                        await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify });
+                        await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify }, beforeData);
                         return newIndex;
                     }
                 }
@@ -48511,6 +49993,7 @@ $CONTENT
                         logError_ACU(`deleteRow: Row index ${normalizedRowIndex} out of bounds.`);
                         return false;
                     }
+                    const beforeData = cloneCurrentTableDataForPersist_ACU();
                     if (isSqliteMode()) {
                         // SQLite 模式：用英文物理表名生成 DELETE SQL；row_id 走参数绑定，避免字符串 row_id 删除失效。
                         const rowId = targetSheet.content[normalizedRowIndex]?.[0];
@@ -48530,7 +50013,7 @@ $CONTENT
                         targetSheet.content.splice(normalizedRowIndex, 1);
                         logDebug_ACU(`deleteRow: Deleted row ${normalizedRowIndex} from [${tableName}]`);
                     }
-                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'deleteRow', { skipChatSave, skipNotify });
+                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'deleteRow', { skipChatSave, skipNotify }, beforeData);
                     return true;
                 }
                 catch (e) {
@@ -51777,19 +53260,21 @@ $CONTENT
      */
     function ensureAssistantHostPortal_ACU(mode, isOpen) {
         const doc = getPortalDocument_ACU();
-        if (!doc)
+        if (!doc || typeof doc.getElementById !== 'function')
             return;
         const host = doc.getElementById(ASSISTANT_HOST_ID_ACU$1);
         if (!host)
             return;
-        const shouldPortal = mode === 'fullscreen-overlay' && isOpen;
-        const isInBody = host.parentElement === doc.body;
-        const dock = doc.querySelector(VISUALIZER_ASSISTANT_DOCK_SELECTOR_ACU);
+        const body = doc.body;
+        const canUseBodyPortal = !!body && typeof body.appendChild === 'function';
+        const shouldPortal = mode === 'fullscreen-overlay' && isOpen && canUseBodyPortal;
+        const isInBody = !!body && host.parentElement === body;
+        const dock = typeof doc.querySelector === 'function' ? doc.querySelector(VISUALIZER_ASSISTANT_DOCK_SELECTOR_ACU) : null;
         if (shouldPortal) {
             host.style.pointerEvents = 'auto';
             if (!isInBody) {
                 host.style.cssText += `;${VIS_PORTAL_VARIABLES_ACU}`;
-                doc.body.appendChild(host);
+                body.appendChild(host);
             }
             return;
         }
@@ -51831,9 +53316,10 @@ $CONTENT
         const isFullscreenInternalScroll = mode === 'fullscreen-overlay' && !isMobileViewport;
         const margin = mode === 'fullscreen-overlay' ? '8px 12px 8px' : '12px 14px 8px';
         const minHeight = mode === 'fullscreen-overlay' ? '180px' : '240px';
-        const flexValue = isDesktopInternalScroll || isFullscreenInternalScroll ? '1 1 auto' : '0 0 auto';
+        const usesInternalScroll = isDesktopInternalScroll || isFullscreenInternalScroll;
+        const flexValue = usesInternalScroll ? '1 1 auto' : '0 0 auto';
         const desktopMaxHeight = 'max-height:min(56vh, 640px);';
-        const overflow = isFullscreenInternalScroll ? 'overflow:hidden;' : 'overflow:visible;';
+        const overflow = usesInternalScroll ? 'overflow:hidden;' : 'overflow:visible;';
         const extra = mode === 'fullscreen-overlay'
             ? (isMobileViewport ? 'max-height:none;' : '')
             : desktopMaxHeight;
@@ -51852,15 +53338,15 @@ $CONTENT
         const padding = mode === 'fullscreen-overlay' ? '12px 12px calc(12px + env(safe-area-inset-bottom, 0px))' : '12px 14px 14px';
         return `padding:${padding}; border-top:1px solid var(--vis-border-color); flex:0 0 auto;`;
     }
-    function shouldShowFloatingRestore_ACU(_mode) {
-        return false;
+    function shouldShowFloatingRestore_ACU(mode) {
+        return mode === 'fullscreen-overlay' && assistantUiState_ACU.isOpen && assistantUiState_ACU.isMinimized;
     }
     function isPanelVisible_ACU(mode) {
         if (!assistantUiState_ACU.isOpen)
             return false;
         if (mode !== 'fullscreen-overlay')
             return true;
-        return true;
+        return !assistantUiState_ACU.isMinimized;
     }
     function buildAssistantControlRowStyle_ACU(mode) {
         if (mode === 'fullscreen-overlay') {
@@ -52573,6 +54059,7 @@ $CONTENT
                     <div class="acu-hint" style="font-size:12px; margin-top:4px;">当前表：${escapeHtml_ACU$1(getSelectedSheetLabel_ACU())}</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                    ${mode === 'fullscreen-overlay' ? '<button id="acu-vis-assistant-minimize" class="acu-btn-secondary" type="button">最小化</button>' : ''}
                     <button id="acu-vis-assistant-close" class="acu-btn-secondary" type="button">关闭</button>
                 </div>
             </div>
@@ -52610,6 +54097,14 @@ $CONTENT
         restoreScrollState_ACU(getChatContainerElement_ACU());
         $host.find('#acu-vis-assistant-close').on('click', () => {
             assistantUiState_ACU.isOpen = false;
+            assistantUiState_ACU.isMinimized = false;
+            renderVisualizerTemplateAssistantPanel_ACU();
+        });
+        $host.find('#acu-vis-assistant-minimize').on('click', () => {
+            assistantUiState_ACU.isMinimized = true;
+            renderVisualizerTemplateAssistantPanel_ACU();
+        });
+        $host.find('#acu-vis-assistant-restore').on('click', () => {
             assistantUiState_ACU.isMinimized = false;
             renderVisualizerTemplateAssistantPanel_ACU();
         });
@@ -52670,8 +54165,14 @@ $CONTENT
             domChanged = true;
         }
         const dock = root.querySelector(ASSISTANT_DOCK_SELECTOR_ACU);
-        if (!root.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && !doc.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && dock) {
-            dock.appendChild(createAssistantHost_ACU(doc));
+        if (!root.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && !doc.querySelector(`#${ASSISTANT_HOST_ID_ACU}`)) {
+            const host = createAssistantHost_ACU(doc);
+            if (dock) {
+                dock.appendChild(host);
+            }
+            else {
+                root.appendChild(host);
+            }
             domChanged = true;
         }
         if (domChanged) {

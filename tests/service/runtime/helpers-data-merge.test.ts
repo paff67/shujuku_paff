@@ -6,7 +6,7 @@
  * 注意：helpers-data-merge.ts 的导入链会触发 env.ts 中的 window.parent 访问，
  * 需要在 import 前 mock 掉 env.ts 和其他依赖浏览器环境的模块
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // mock 掉所有依赖浏览器环境的模块
 vi.mock('../../../src/shared/env', () => ({
@@ -72,6 +72,19 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   initIsolatedTagSlot_ACU: vi.fn(() => ({ independentData: {}, modifiedKeys: [], updateGroupKeys: [] })),
   writeLegacyCompatData_ACU: vi.fn(),
 }));
+
+vi.mock('../../../src/service/table/table-delta-repository', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/service/table/table-delta-repository')>();
+  return {
+    ...actual,
+    writeTablePersistenceLayerV2_ACU: vi.fn((message: any, isolationKey: string, layer: any) => {
+      const container = message.TavernDB_ACU_IsolatedData || (message.TavernDB_ACU_IsolatedData = {});
+      const tagData = container[isolationKey] || (container[isolationKey] = { independentData: {}, modifiedKeys: [], updateGroupKeys: [] });
+      tagData.tablePersistenceV2 = layer;
+    }),
+    clearCurrentIsolationLegacyTableSnapshots_ACU: vi.fn(),
+  };
+});
 
 vi.mock('../../../src/shared/template-preset-utils', () => ({
   deriveTemplatePresetNameForImport_ACU: vi.fn(() => ''),
@@ -308,6 +321,7 @@ import { mergeAllIndependentTables_ACU } from '../../../src/service/runtime/help
 import { getChatArray_ACU } from '../../../src/data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU } from '../../../src/service/runtime/state-manager';
 import { readIsolatedTagData_ACU, isLegacyMatchForIsolation_ACU, readLegacyIndependentData_ACU } from '../../../src/data/repositories/chat-message-data-repo';
+import { writeTablePersistenceLayerV2_ACU, clearCurrentIsolationLegacyTableSnapshots_ACU } from '../../../src/service/table/table-delta-repository';
 import { getChatSheetGuideDataForIsolationKey_ACU, getTemplateSheetKeys_ACU, getSortedSheetKeys_ACU, reorderDataBySheetKeys_ACU, materializeDataFromSheetGuide_ACU } from '../../../src/service/template/chat-scope';
 
 describe('mergeAllIndependentTables_ACU', () => {
@@ -591,6 +605,77 @@ describe('formatJsonToReadable_ACU', () => {
     expect(result.readableText).not.toContain('row_id');
   });
 
+  it('表头不含 row_id 时保留第一列真实业务字段', () => {
+    const jsonData = {
+      sheet_0: {
+        name: '主角信息表',
+        content: [
+          ['人物名称', '性别'],
+          ['陈默', '男'],
+        ],
+      },
+    };
+    const result = formatJsonToReadable_ACU(jsonData);
+    expect(result.readableText).toContain('# 主角信息表');
+    expect(result.readableText).toContain('| 人物名称 | 性别 |');
+    expect(result.readableText).toContain('| 陈默 | 男 |');
+  });
+
+  it('表头不含 row_id 且只有一列真实业务字段时不会输出为空表', () => {
+    const jsonData = {
+      sheet_0: {
+        name: '主角技能表',
+        content: [
+          ['技能名称'],
+          ['格斗'],
+        ],
+      },
+    };
+    const result = formatJsonToReadable_ACU(jsonData);
+    expect(result.readableText).toContain('# 主角技能表');
+    expect(result.readableText).toContain('| 技能名称 |');
+    expect(result.readableText).toContain('| 格斗 |');
+  });
+
+  it('只有 row_id 或没有可显示表头的空壳表不输出孤立标题', () => {
+    const jsonData = {
+      sheet_0: {
+        name: '空壳表A',
+        content: [['row_id'], ['1']],
+      },
+      sheet_1: {
+        name: '空壳表B',
+        content: [],
+      },
+    };
+    const result = formatJsonToReadable_ACU(jsonData);
+    expect(result.readableText).not.toContain('# 空壳表A');
+    expect(result.readableText).not.toContain('# 空壳表B');
+  });
+
+  it('只有空白业务单元格的表不输出孤立标题', () => {
+    const jsonData = {
+      sheet_0: {
+        name: '空白数据表',
+        content: [['row_id', '备注'], ['1', '   ']],
+      },
+    };
+    const result = formatJsonToReadable_ACU(jsonData);
+    expect(result.readableText).not.toContain('# 空白数据表');
+  });
+
+  it('数字 0 和 boolean false 属于有效业务数据', () => {
+    const jsonData = {
+      sheet_0: {
+        name: '数值表',
+        content: [['row_id', '数量', '开关'], ['1', 0, false]],
+      },
+    };
+    const result = formatJsonToReadable_ACU(jsonData);
+    expect(result.readableText).toContain('# 数值表');
+    expect(result.readableText).toContain('| 0 | false |');
+  });
+
   it('重要人物表被提取到独立字段，不出现在 readableText 中', () => {
     const jsonData = {
       sheet_0: {
@@ -710,7 +795,7 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
     vi.mocked(buildChatSheetGuideDataFromTemplateObj_ACU).mockReturnValue(null);
   });
 
-  it('正常填充：写入隔离标签数据、同步旧格式、保存聊天', async () => {
+  it('正常填充：写入 V2 checkpoint、清理旧快照、保存聊天', async () => {
     const templateObj = {
       sheet_0: {
         name: '背包物品表',
@@ -720,10 +805,11 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
 
     const result = await fillFirstLayerWithTemplateData_ACU(templateObj);
     expect(result).toEqual({ success: true, messageIndex: 0, sheetCount: 1 });
-    // 验证写入了隔离标签数据
-    expect(vi.mocked(initIsolatedTagSlot_ACU)).toHaveBeenCalledTimes(1);
-    // 验证同步了旧格式
-    expect(vi.mocked(writeLegacyCompatData_ACU)).toHaveBeenCalledTimes(1);
+    // 验证写入了 V2 checkpoint，并清理旧快照
+    expect(vi.mocked(writeTablePersistenceLayerV2_ACU)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(writeTablePersistenceLayerV2_ACU).mock.calls[0][2].checkpoint?.source).toBe('template-seed');
+    expect(vi.mocked(clearCurrentIsolationLegacyTableSnapshots_ACU)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(writeLegacyCompatData_ACU)).not.toHaveBeenCalled();
     // 验证保存了聊天
     expect(vi.mocked(saveChatToHost_ACU)).toHaveBeenCalledTimes(1);
     // 验证更新了内存数据
@@ -1030,7 +1116,7 @@ describe('seedGreetingLocalDataFromTemplate_ACU', () => {
     expect(result).toBe(false);
   });
 
-  it('正常首次写入：写入隔离标签、同步旧格式、保存聊天、清理世界书、更新内存', async () => {
+  it('正常首次写入：只写入 V2 checkpoint、保存聊天、清理世界书、更新内存', async () => {
     const greetingMsg: any = { is_user: false, mes: 'AI开场白' };
     vi.mocked(getChatArray_ACU).mockReturnValue([greetingMsg]);
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
@@ -1043,14 +1129,19 @@ describe('seedGreetingLocalDataFromTemplate_ACU', () => {
 
     // 返回成功
     expect(result).toEqual({ success: true, messageIndex: 0 });
-    // 写入了隔离标签数据
-    expect(vi.mocked(initIsolatedTagSlot_ACU)).toHaveBeenCalledTimes(1);
-    // tagSlot 的 independentData 被填充
-    expect(tagSlot.independentData).toHaveProperty('sheet_0');
-    // modifiedKeys 为空（基底数据不算AI更新）
+    // 写入了 V2 checkpoint，基底数据不算 AI 更新
+    expect(vi.mocked(writeTablePersistenceLayerV2_ACU)).toHaveBeenCalledTimes(1);
+    const checkpoint = vi.mocked(writeTablePersistenceLayerV2_ACU).mock.calls[0][2].checkpoint;
+    expect(checkpoint?.source).toBe('template-seed');
+    expect(checkpoint?.messageIndexHint).toBe(0);
+    expect(checkpoint?.data.sheet_0.content).toEqual([['row_id', '物品名称'], ['1', '铁剑']]);
+    expect(greetingMsg.TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint).toBe(checkpoint);
+    expect(vi.mocked(clearCurrentIsolationLegacyTableSnapshots_ACU)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(writeLegacyCompatData_ACU)).not.toHaveBeenCalled();
+    // 锁死读取源：模板基底只能作为 checkpoint 存在，不能再并行写 legacy-style independentData。
+    expect(tagSlot.independentData).toEqual({});
     expect(tagSlot.modifiedKeys).toEqual([]);
-    // 同步了旧格式
-    expect(vi.mocked(writeLegacyCompatData_ACU)).toHaveBeenCalledTimes(1);
+    expect(tagSlot.updateGroupKeys).toEqual([]);
     // 标记了幂等
     expect(greetingMsg._acu_local_template_base_state_seeded).toBe(GREETING_LOCAL_BASE_STATE_MARKER_ACU);
     // 保存了聊天

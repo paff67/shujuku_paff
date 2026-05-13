@@ -43,6 +43,11 @@ export function _forceExtensionMode(): void {
 export function detectRuntimeMode(): RuntimeMode {
     if (_cachedMode !== null) return _cachedMode;
 
+    if (typeof window === 'undefined') {
+        _cachedMode = RuntimeMode.Extension;
+        return _cachedMode;
+    }
+
     try {
         // 如果 window.parent 存在且不等于 window，说明在 iframe 中
         if (typeof window.parent !== 'undefined' && window.parent !== window) {
@@ -78,6 +83,10 @@ export function isExtensionMode(): boolean {
  * - 插件模式：返回 window（自身就是主窗口）
  */
 export function getHostWindow(): Window {
+    if (typeof window === 'undefined') {
+        return globalThis as unknown as Window;
+    }
+
     if (isUserscriptMode()) {
         try {
             return window.parent || window;

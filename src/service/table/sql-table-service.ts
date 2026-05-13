@@ -13,6 +13,7 @@ import type {
   SqlQueryResult,
   SqlMutationResult,
   ApplyEditsResult,
+  TableSaveToChatOptions,
 } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
@@ -24,7 +25,7 @@ import {
   currentJsonTableData_ACU,
   _set_currentJsonTableData_ACU,
 } from '../runtime/state-manager';
-import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
+import { mergeAllIndependentTablesWithMeta_ACU } from '../runtime/helpers-data-merge';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
 import { buildGlobalNameMapper, disposeGlobalNameMapper } from '../runtime/template-vars/name-mapper';
 import { parseDDLTableName, generateDDL, generateInserts } from '../../data/sqlite/schema-mapper';
@@ -38,6 +39,8 @@ export class SqlTableService implements ITableStorageProvider {
   private engine: SqliteEngine;
   private syncBridge: SyncBridge;
   private _initialized = false;
+  private committedSnapshot: TableDataObject_ACU | null = null;
+  private pendingBeforeSnapshot: TableDataObject_ACU | null = null;
 
   constructor() {
     this.engine = new SqliteEngine();
@@ -60,8 +63,12 @@ export class SqlTableService implements ITableStorageProvider {
       // 初始化 SQLite 引擎
       await this.engine.init();
 
-      // 从聊天消息合并出最新 JSON 快照
-      const mergedData = await mergeAllIndependentTables_ACU();
+      // 从聊天消息合并出最新 JSON 快照，并保留 V2/legacy migration 元信息。
+      // SQL 模式不能只靠 content.length 猜测是否真实数据：旧聊天懒迁移出来的 checkpoint
+      // 可能在表结构/指导表合并后看起来像空壳，但它仍然代表历史快照，必须加载进 SQLite。
+      const mergeResult = await mergeAllIndependentTablesWithMeta_ACU();
+      const mergedData = mergeResult.data;
+      const hasAnyMergedSheet = !!mergedData && Object.keys(mergedData).some(k => k.startsWith('sheet_'));
 
       // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
       // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
@@ -78,8 +85,9 @@ export class SqlTableService implements ITableStorageProvider {
           if (sheet._acu_from_base_state) return false;
           return true;
         });
+      const shouldLoadMigratedLegacySnapshot = mergeResult.usedLegacyMigration && hasAnyMergedSheet;
 
-      if (!mergedData || !hasRealDataRows) {
+      if (!mergedData || (!hasRealDataRows && !shouldLoadMigratedLegacySnapshot)) {
         // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
         // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
         // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
@@ -88,8 +96,10 @@ export class SqlTableService implements ITableStorageProvider {
           // 空壳结构：仍然更新 JSON 视图（前端需要显示表头），但不建 SQLite 表
           _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
           this._buildNameMapper(mergedData as TableDataObject_ACU);
+          this._markCommitted(mergedData as TableDataObject_ACU);
           logDebug_ACU('[SqlTableService] 检测到空壳结构（仅表头无数据行），引擎已就绪，等待第一次填表时建表');
         } else {
+          this._markCommitted(null);
           logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
         }
         this._initialized = true;
@@ -105,6 +115,7 @@ export class SqlTableService implements ITableStorageProvider {
       // 从所有表的 DDL 构建中英文名称映射器
       this._buildNameMapper(mergedData as TableDataObject_ACU);
 
+      this._markCommitted(mergedData as TableDataObject_ACU);
       this._initialized = true;
       logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
       return { loaded: true, source: 'merged' };
@@ -121,24 +132,43 @@ export class SqlTableService implements ITableStorageProvider {
    * 2. 更新 currentJsonTableData_ACU
    * 3. saveIndependentTableToChatHistory_ACU() 写入聊天
    */
+  async saveToChat(options?: TableSaveToChatOptions): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
   async saveToChat(
     targetSheetKeys?: string[] | null,
+    updateGroupKeys?: string[] | null,
+  ): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
+  async saveToChat(
+    targetSheetKeysOrOptions?: string[] | null | TableSaveToChatOptions,
     updateGroupKeys?: string[] | null,
   ): Promise<{ saved: boolean; messageIndex?: number; error?: string }> {
     this._ensureInitialized();
 
     try {
+      const saveOptions = this._normalizeSaveOptions(targetSheetKeysOrOptions, updateGroupKeys);
       // 从 SQLite 导出最新数据到 JSON 视图
-      const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-      const exportedData = this.syncBridge.exportToTableData(mate);
-      _set_currentJsonTableData_ACU(exportedData);
+      const exportedData = this.syncBridge.exportToTableData(this._getCurrentMate());
+      const resolvedData = this._resolveExportedDataForJsonView(exportedData);
+      _set_currentJsonTableData_ACU(resolvedData);
 
-      // 写入聊天消息
-      return saveIndependentTableToChatHistory_ACU(
-        -1,
-        targetSheetKeys ?? null,
-        updateGroupKeys ?? null,
-      );
+      const afterData = saveOptions.afterData !== undefined
+        ? saveOptions.afterData
+        : resolvedData;
+      const beforeData = saveOptions.beforeData !== undefined
+        ? saveOptions.beforeData
+        : this.pendingBeforeSnapshot ?? this.committedSnapshot;
+
+      const result = await saveIndependentTableToChatHistory_ACU({
+        ...saveOptions,
+        targetMessageIndex: saveOptions.targetMessageIndex ?? -1,
+        beforeData,
+        afterData,
+      });
+
+      if (result.saved) {
+        this._markCommitted(afterData);
+      }
+
+      return result;
     } catch (e: any) {
       const errMsg = e?.message || String(e);
       logError_ACU(`[SqlTableService] 保存失败: ${errMsg}`);
@@ -156,14 +186,40 @@ export class SqlTableService implements ITableStorageProvider {
     }
 
     try {
-      const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-      const exportedData = this.syncBridge.exportToTableData(mate);
-      _set_currentJsonTableData_ACU(exportedData);
-      return exportedData;
+      const exportedData = this.syncBridge.exportToTableData(this._getCurrentMate());
+      const resolvedData = this._resolveExportedDataForJsonView(exportedData);
+      _set_currentJsonTableData_ACU(resolvedData);
+      return resolvedData;
     } catch (e: any) {
       logError_ACU(`[SqlTableService] getCurrentData 失败: ${e?.message}`);
       return currentJsonTableData_ACU;
     }
+  }
+
+  /**
+   * 用指定 JSON 快照替换 SQLite 模式当前数据源。
+   * 批处理填表需要让提示词基底与 SQL 执行引擎完全一致；否则 AI 看到的当前数据
+   * 和 INSERT/UPDATE 实际作用的数据库不是同一份状态。
+   */
+  async replaceCurrentData(data: TableDataObject_ACU | null): Promise<void> {
+    this.engine.dispose();
+    disposeGlobalNameMapper();
+    this.engine = new SqliteEngine();
+    this.syncBridge = new SyncBridge(this.engine);
+    await this.engine.init();
+
+    if (data) {
+      const clonedData = this._cloneTableData(data)!;
+      this.syncBridge.loadFromTableData(clonedData);
+      _set_currentJsonTableData_ACU(clonedData);
+      this._buildNameMapper(clonedData);
+      this._markCommitted(clonedData);
+    } else {
+      _set_currentJsonTableData_ACU(null);
+      this._markCommitted(null);
+    }
+
+    this._initialized = true;
   }
 
   /**
@@ -197,6 +253,9 @@ export class SqlTableService implements ITableStorageProvider {
       return normalizeStatementValues(structNormalized);
     });
 
+    const hadPendingBeforeMutation = !!this.pendingBeforeSnapshot;
+    this._markMutationStarted();
+
     try {
       // 事务执行
       const result = this.engine.runBatch(statements);
@@ -216,6 +275,9 @@ export class SqlTableService implements ITableStorageProvider {
         appliedEdits: statements.length,
       };
     } catch (e: any) {
+      if (!hadPendingBeforeMutation) {
+        this.pendingBeforeSnapshot = null;
+      }
       // 事务已回滚，数据保持原样
       const errMsg = e?.message || String(e);
       logError_ACU(`[SqlTableService] SQL 执行失败: ${errMsg}`);
@@ -248,13 +310,18 @@ export class SqlTableService implements ITableStorageProvider {
   executeMutation(sql: string, params?: (string | number | null)[]): SqlMutationResult {
     this._ensureInitialized();
     this._ensureTablesFromTemplate();
+    const hadPendingBeforeMutation = !!this.pendingBeforeSnapshot;
     try {
       // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
       const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
+      this._markMutationStarted();
       const result = this.engine.run(normalizedSql, params);
       this._syncToJson();
       return { changes: result.changes, errors: [] };
     } catch (e: any) {
+      if (!hadPendingBeforeMutation) {
+        this.pendingBeforeSnapshot = null;
+      }
       return { changes: 0, errors: [e?.message || String(e)] };
     }
   }
@@ -272,6 +339,71 @@ export class SqlTableService implements ITableStorageProvider {
   // ═══════════════════════════════════════════════════════════════
   // 内部方法
   // ═══════════════════════════════════════════════════════════════
+
+  private _cloneTableData(data: TableDataObject_ACU | null): TableDataObject_ACU | null {
+    return data ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : null;
+  }
+
+  private _markCommitted(data: TableDataObject_ACU | null): void {
+    this.committedSnapshot = this._cloneTableData(data);
+    this.pendingBeforeSnapshot = null;
+  }
+
+  private _markMutationStarted(): void {
+    if (!this.pendingBeforeSnapshot) {
+      this.pendingBeforeSnapshot = this._cloneTableData(this.committedSnapshot);
+    }
+  }
+
+  private _normalizeSaveOptions(
+    targetSheetKeysOrOptions?: string[] | null | TableSaveToChatOptions,
+    updateGroupKeys?: string[] | null,
+  ): TableSaveToChatOptions {
+    if (targetSheetKeysOrOptions && !Array.isArray(targetSheetKeysOrOptions) && typeof targetSheetKeysOrOptions === 'object') {
+      return targetSheetKeysOrOptions;
+    }
+
+    return {
+      targetMessageIndex: -1,
+      targetSheetKeys: Array.isArray(targetSheetKeysOrOptions) ? targetSheetKeysOrOptions : null,
+      updateGroupKeys: updateGroupKeys ?? null,
+    };
+  }
+
+  private _getCurrentMate(): Mate_ACU {
+    return (currentJsonTableData_ACU?.mate as Mate_ACU) || {
+      type: 'acu',
+      version: 1,
+      updateConfigUiSentinel: 0,
+      globalInjectionConfig: {
+        readableEntryPlacement: { position: '', depth: 0, order: 0 },
+        wrapperPlacement: { position: '', depth: 0, order: 0 },
+      },
+    };
+  }
+
+  private _hasSheetEntries(data: TableDataObject_ACU | null | undefined): boolean {
+    return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+  }
+
+  /**
+   * 解析 SQLite 导出结果在 JSON 视图中的最终形态。
+   *
+   * 新开对话/空壳结构下，SQLite 尚未物化用户表，但 currentJsonTableData_ACU 中已经有
+   * header-only 模板结构供 UI 和提示词使用。此时空库导出会合法返回 mate-only；不能让它
+   * 覆盖仍有业务意义的 JSON 空壳，否则表格会在刷新链路中闪一下后消失。
+   */
+  private _resolveExportedDataForJsonView(exportedData: TableDataObject_ACU): TableDataObject_ACU {
+    if (
+      this.engine.getTableNames().length === 0 &&
+      !this._hasSheetEntries(exportedData) &&
+      this._hasSheetEntries(currentJsonTableData_ACU)
+    ) {
+      return currentJsonTableData_ACU as TableDataObject_ACU;
+    }
+
+    return exportedData;
+  }
 
   /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
   private _buildNameMapper(data: TableDataObject_ACU): void {
@@ -298,9 +430,9 @@ export class SqlTableService implements ITableStorageProvider {
   /** 同步 SQLite → JSON 视图 */
   private _syncToJson(): void {
     try {
-      const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-      const exportedData = this.syncBridge.exportToTableData(mate);
-      _set_currentJsonTableData_ACU(exportedData);
+      const exportedData = this.syncBridge.exportToTableData(this._getCurrentMate());
+      const resolvedData = this._resolveExportedDataForJsonView(exportedData);
+      _set_currentJsonTableData_ACU(resolvedData);
     } catch (e: any) {
       logError_ACU(`[SqlTableService] syncToJson 失败: ${e?.message}`);
     }

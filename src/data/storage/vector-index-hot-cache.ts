@@ -1,4 +1,4 @@
-import type { ChatSummaryVectorIndexChunk_ACU, ChatSummaryVectorIndexManifest_ACU } from '../../service/vector/summary-vector-index-types';
+import type { ChatSummaryVectorIndexChunk_ACU, ChatSummaryVectorIndexManifest_ACU } from '../../shared/models/summary-vector-index';
 
 const DB_NAME_ACU = 'TavernDB_ACU_VectorHotCache';
 const DB_VERSION_ACU = 2;

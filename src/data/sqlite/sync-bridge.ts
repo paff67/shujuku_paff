@@ -44,7 +44,7 @@ export class SyncBridge {
     }
 
     // 创建元数据表
-    this.engine.run(META_TABLE_DDL);
+    this._ensureMetaTable();
 
     // 遍历所有 sheet
     const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
@@ -77,7 +77,8 @@ export class SyncBridge {
 
     const result: TableDataObject_ACU = { mate: originalMate };
 
-    // 读取元数据
+    // 读取元数据。空数据库也必须有内部元表，避免把正常空状态变成 SQLite 错误日志。
+    this._ensureMetaTable();
     const metaMap = this._loadAllMeta();
 
     // 遍历所有用户表
@@ -114,6 +115,11 @@ export class SyncBridge {
   // 内部方法
   // ═══════════════════════════════════════════════════════════════
 
+  /** 确保内部元数据表存在。只创建 _acu_ 系统表，不创建任何用户表。 */
+  private _ensureMetaTable(): void {
+    this.engine.run(META_TABLE_DDL);
+  }
+
   /** 加载单张 sheet 到 SQLite */
   private _loadSheet(sheetKey: string, sheet: Sheet_ACU): void {
     // 生成 DDL
@@ -135,6 +141,11 @@ export class SyncBridge {
         );
       }
     }
+
+    // loadFromTableData 的语义是用传入 JSON 快照替换 SQLite 中的当前表数据。
+    // 即使调用方复用同一个 engine，或运行环境未完全释放旧 sql.js Database，
+    // 也不能让 CREATE TABLE 因同名用户表已存在而失败。
+    this._dropExistingUserTable(tableName);
 
     // 建表
     this.engine.run(ddl);
@@ -158,6 +169,24 @@ export class SyncBridge {
         JSON.stringify(sheet.exportConfig || {}),
       ]
     );
+  }
+
+  /**
+   * 删除已存在的用户表，保证 loadFromTableData 具备替换式加载语义。
+   * 内部元数据表和非法表名不会走到这里：tableName 来自 DDL 解析，仍做防御性校验。
+   */
+  private _dropExistingUserTable(tableName: string): void {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+      throw new Error(`非法表名: ${tableName}`);
+    }
+    if (tableName.startsWith('_acu_') || tableName.startsWith('sqlite_')) {
+      throw new Error(`拒绝删除内部表: ${tableName}`);
+    }
+
+    if (this.engine.getTableDDL(tableName) !== null) {
+      logDebug_ACU(`[SyncBridge] 替换加载前删除已存在表: ${tableName}`);
+      this.engine.run(`DROP TABLE ${tableName};`);
+    }
   }
 
   /** 从 SQLite 导出单张表为 Sheet_ACU */

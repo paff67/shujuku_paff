@@ -23,10 +23,12 @@ const {
   mockGetImportBatchPrefix, mockGetImportStablePrefix,
   mockLogDebug, mockLogError, mockLogWarn,
   mockParseTableTemplateJson, mockIsEntryBlocked,
-  mockFormatJsonToReadable, mockMaybeLiftWorldbookSuppression,
-  mockMergeAllIndependentTables, mockShouldSuppressWorldbookInjection,
-  mockAllocConsecutiveOrderBlock, mockApplyPlacementToEntry,
-  mockBuildDefaultGlobalInjectionConfig, mockBuildUsedOrderSet,
+    mockFormatJsonToReadable, mockGetReadableContentStartColumn,
+    mockHasReadableRowCellData, mockMaybeLiftWorldbookSuppression,
+    mockMergeAllIndependentTables, mockShouldSuppressWorldbookInjection,
+    mockIsSqliteMode, mockReloadStorageProvider, mockGetStorageProvider,
+    mockAllocConsecutiveOrderBlock, mockApplyPlacementToEntry,
+mockBuildDefaultGlobalInjectionConfig, mockBuildUsedOrderSet,
   mockEnsureExportConfigDefaults, mockEnsureGlobalInjectionConfigDefaults,
   mockGetEntryOrderNumber, mockGetFixedPlacementDefaultsForTable,
   mockGetInjectionTargetLorebook, mockGetIsolationPrefix,
@@ -84,9 +86,35 @@ const {
       summaryTable: null,
       outlineTable: null,
     })),
+    mockGetReadableContentStartColumn: vi.fn((headerRow: any) => {
+      if (!Array.isArray(headerRow) || headerRow.length === 0) return 0;
+      return String(headerRow[0] ?? '').trim().toLowerCase() === 'row_id' ? 1 : 0;
+    }),
+    mockHasReadableRowCellData: vi.fn((row: any, startColumn: number) => {
+      if (!Array.isArray(row)) return false;
+      for (let c = Math.max(0, startColumn); c < row.length; c++) {
+        const cell = row[c];
+        if (cell === null || cell === undefined) continue;
+        if (typeof cell === 'string') {
+          if (cell.trim() !== '') return true;
+        } else if (typeof cell === 'number') {
+          if (!Number.isNaN(cell)) return true;
+        } else if (typeof cell === 'boolean') {
+          return true;
+        } else {
+          return true;
+        }
+      }
+      return false;
+    }),
     mockMaybeLiftWorldbookSuppression: vi.fn(),
     mockMergeAllIndependentTables: vi.fn(async () => null),
     mockShouldSuppressWorldbookInjection: vi.fn(() => false),
+    mockIsSqliteMode: vi.fn(() => false),
+    mockReloadStorageProvider: vi.fn(async () => {}),
+    mockGetStorageProvider: vi.fn(() => ({
+      getCurrentData: vi.fn(() => mockCurrentJsonTableData.value),
+    })),
     mockAllocConsecutiveOrderBlock: vi.fn(() => 100),
     mockApplyPlacementToEntry: vi.fn((entry: any, placement: any) => ({ ...entry, ...placement })),
     mockBuildDefaultGlobalInjectionConfig: vi.fn(() => ({
@@ -185,9 +213,20 @@ vi.mock('../../../src/shared/utils', () => ({
 
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
   formatJsonToReadable_ACU: mockFormatJsonToReadable,
+  getReadableContentStartColumn_ACU: mockGetReadableContentStartColumn,
+  hasReadableRowCellData_ACU: mockHasReadableRowCellData,
   maybeLiftWorldbookSuppression_ACU: mockMaybeLiftWorldbookSuppression,
   mergeAllIndependentTables_ACU: mockMergeAllIndependentTables,
   shouldSuppressWorldbookInjection_ACU: mockShouldSuppressWorldbookInjection,
+}));
+
+vi.mock('../../../src/service/table/storage-mode', () => ({
+  isSqliteMode: mockIsSqliteMode,
+}));
+
+vi.mock('../../../src/service/table/table-storage-strategy', () => ({
+  reloadStorageProvider: mockReloadStorageProvider,
+  getStorageProvider: mockGetStorageProvider,
 }));
 
 vi.mock('../../../src/service/worldbook/injection-engine', () => ({
@@ -714,6 +753,46 @@ describe('updateReadableLorebookEntry_ACU', () => {
     expect(mockUpdateSummaryTableEntries).toHaveBeenCalled();
     expect(mockUpdateOutlineTableEntry).toHaveBeenCalled();
     expect(mockUpdateCustomTableExports).toHaveBeenCalled();
+  });
+
+  it('表头不含 row_id 时用首列真实业务数据判定数据库非空', async () => {
+    const mergedData = {
+      sheet_0: { name: '主角技能表', content: [['技能名称'], ['格斗']] },
+    };
+    mockMergeAllIndependentTables.mockResolvedValue(mergedData);
+    mockFormatJsonToReadable.mockReturnValue({
+      readableText: '# 主角技能表\n\n| 技能名称 |\n|---|\n| 格斗 |\n',
+      importantPersonsTable: null,
+      summaryTable: null,
+      outlineTable: null,
+    });
+
+    await updateReadableLorebookEntry_ACU(true, false);
+
+    expect(mockGetReadableContentStartColumn).toHaveBeenCalledWith(['技能名称']);
+    expect(mockHasReadableRowCellData).toHaveBeenCalledWith(['格斗'], 0);
+    expect(mockUpdateCustomTableExports).toHaveBeenCalledWith(mergedData, false);
+    expect(mockGwCreateLorebookEntries).toHaveBeenCalled();
+  });
+
+  it('只有 row_id 的空壳表按空数据处理并清理自定义导出', async () => {
+    const mergedData = {
+      sheet_0: { name: '空壳表', content: [['row_id'], ['1']] },
+    };
+    mockMergeAllIndependentTables.mockResolvedValue(mergedData);
+    mockFormatJsonToReadable.mockReturnValue({
+      readableText: '',
+      importantPersonsTable: null,
+      summaryTable: null,
+      outlineTable: null,
+    });
+
+    await updateReadableLorebookEntry_ACU(true, false);
+
+    expect(mockGetReadableContentStartColumn).toHaveBeenCalledWith(['row_id']);
+    expect(mockHasReadableRowCellData).toHaveBeenCalledWith(['1'], 1);
+    expect(mockUpdateCustomTableExports).toHaveBeenCalledWith(null, false);
+    expect(mockGwCreateLorebookEntries).not.toHaveBeenCalled();
   });
 });
 

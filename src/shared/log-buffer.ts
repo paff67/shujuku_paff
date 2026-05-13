@@ -100,12 +100,9 @@ function normalizeLogArg_ACU(arg: any): string {
   const maybeErrorMessage = typeof arg?.message === 'string' ? arg.message : '';
   const maybeErrorStack = typeof arg?.stack === 'string' ? arg.stack : '';
   if (arg instanceof Error || maybeErrorMessage || maybeErrorStack) {
-    const parts: string[] = [];
     const header = `${maybeErrorName || 'Error'}${maybeErrorMessage ? `: ${maybeErrorMessage}` : ''}`;
-    parts.push(header);
-    if (maybeErrorStack && maybeErrorStack !== header) parts.push(maybeErrorStack);
-    if (arg?.cause !== undefined) parts.push(`cause=${normalizeLogArg_ACU(arg.cause)}`);
-    return parts.join(' | ');
+    if (arg?.cause !== undefined) return `${header} | cause=${normalizeLogArg_ACU(arg.cause)}`;
+    return header;
   }
 
   try {

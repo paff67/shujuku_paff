@@ -28,6 +28,17 @@ export interface SqlMutationResult {
   errors: string[];
 }
 
+/** 保存到聊天消息的选项 */
+export interface TableSaveToChatOptions {
+  targetMessageIndex?: number;
+  targetSheetKeys?: string[] | null;
+  updateGroupKeys?: string[] | null;
+  beforeData?: TableDataObject_ACU | null;
+  afterData?: TableDataObject_ACU | null;
+  trackingSheetKeys?: string[] | null;
+  trackAsUpdate?: boolean;
+}
+
 /** AI 编辑应用结果 */
 export interface ApplyEditsResult {
   /** 是否成功 */
@@ -67,6 +78,7 @@ export interface ITableStorageProvider {
    * - native：调用 saveIndependentTableToChatHistory_ACU
    * - sqlite：exportToTableData → 更新 JSON 视图 → saveIndependentTable
    */
+  saveToChat(options?: TableSaveToChatOptions): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
   saveToChat(
     targetSheetKeys?: string[] | null,
     updateGroupKeys?: string[] | null,
@@ -77,6 +89,18 @@ export interface ITableStorageProvider {
    * 两种模式都返回 TableDataObject_ACU，保证上层代码零改动
    */
   getCurrentData(): TableDataObject_ACU | null;
+
+  /**
+   * 用调用方提供的 JSON 表格快照替换当前运行时数据源。
+   *
+   * 这是批处理填表的关键同步点：提示词构造会读取同一批次的历史基底，
+   * SQL 模式也必须把 SQLite 内存库替换成同一份基底，否则就会出现
+   * “提示词看到 A、SQL 写入 B”的双数据源事故。
+   *
+   * - native：仅同步 currentJsonTableData_ACU
+   * - sqlite：重建 SQLite 内存库并从该快照加载，同时同步 JSON 视图与 committed snapshot
+   */
+  replaceCurrentData(data: TableDataObject_ACU | null): Promise<void>;
 
   /**
    * 应用 AI 返回的编辑指令

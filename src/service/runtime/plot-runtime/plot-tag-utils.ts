@@ -333,7 +333,7 @@ import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU, parseRand
   }
 
   export function aggregatePlotTaskTags_ACU(taskResults: any[]) {
-    const aggregated = new Map();
+    const aggregated = new Map() as Map<string, any[]> & { aggregated?: Map<string, any[]>; injectOnlyTagNames?: Set<string> };
     // 新增：记录哪些 tagName 来自 extractInjectTags（不参与尾追加）
     const injectOnlyTagNames = new Set<string>();
     const sortedResults = sortPlotTaskResults_ACU(taskResults);
@@ -342,7 +342,7 @@ import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU, parseRand
       if (!result?.success || !result.extractedTags || typeof result.extractedTags !== 'object') return;
       Object.entries(result.extractedTags).forEach(([tagName, content]: [string, any]) => {
         if (!aggregated.has(tagName)) aggregated.set(tagName, []);
-        aggregated.get(tagName).push(content ?? '');
+        aggregated.get(tagName)!.push(content ?? '');
       });
       // 收集 injectOnly 标签名
       if (Array.isArray(result.injectOnlyTagNames)) {
@@ -350,7 +350,9 @@ import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU, parseRand
       }
     });
 
-    return { aggregated, injectOnlyTagNames };
+    aggregated.aggregated = aggregated;
+    aggregated.injectOnlyTagNames = injectOnlyTagNames;
+    return aggregated;
   }
 
   export function buildAggregatedPlotTagBlocks_ACU(aggregatedTags: Map<string, any>) {

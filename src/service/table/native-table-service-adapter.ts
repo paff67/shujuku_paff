@@ -11,6 +11,7 @@ import type {
   SqlQueryResult,
   SqlMutationResult,
   ApplyEditsResult,
+  TableSaveToChatOptions,
 } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import {
@@ -18,7 +19,7 @@ import {
   saveIndependentTableToChatHistory_ACU,
 } from './table-service';
 import { parseAndApplyTableEdits_ACU } from '../ai/prompt-builder/table-edit-parser';
-import { currentJsonTableData_ACU } from '../runtime/state-manager';
+import { currentJsonTableData_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 
 export class NativeTableServiceAdapter implements ITableStorageProvider {
@@ -43,13 +44,29 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
    * 保存当前数据到聊天消息
    * 委托给 saveIndependentTableToChatHistory_ACU
    */
+  async saveToChat(options?: TableSaveToChatOptions): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
   async saveToChat(
     targetSheetKeys?: string[] | null,
     updateGroupKeys?: string[] | null,
+  ): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
+  async saveToChat(
+    targetSheetKeysOrOptions?: string[] | null | TableSaveToChatOptions,
+    updateGroupKeys?: string[] | null,
   ): Promise<{ saved: boolean; messageIndex?: number; error?: string }> {
+    if (targetSheetKeysOrOptions && !Array.isArray(targetSheetKeysOrOptions) && typeof targetSheetKeysOrOptions === 'object') {
+      return saveIndependentTableToChatHistory_ACU({
+        targetMessageIndex: -1,
+        ...targetSheetKeysOrOptions,
+      });
+    }
+
+    const targetSheetKeys = Array.isArray(targetSheetKeysOrOptions)
+      ? targetSheetKeysOrOptions
+      : null;
+
     return saveIndependentTableToChatHistory_ACU(
       -1,
-      targetSheetKeys ?? null,
+      targetSheetKeys,
       updateGroupKeys ?? null,
     );
   }
@@ -60,6 +77,14 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
    */
   getCurrentData(): TableDataObject_ACU | null {
     return currentJsonTableData_ACU;
+  }
+
+  /**
+   * 用指定 JSON 快照替换原生模式运行时数据。
+   * 原生模式没有独立引擎，只需要同步全局 JSON 视图。
+   */
+  async replaceCurrentData(data: TableDataObject_ACU | null): Promise<void> {
+    _set_currentJsonTableData_ACU(data ? JSON.parse(JSON.stringify(data)) : null);
   }
 
   /**

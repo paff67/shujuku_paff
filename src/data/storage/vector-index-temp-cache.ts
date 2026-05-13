@@ -1,4 +1,4 @@
-import type { SummaryVectorIndexShard_ACU } from '../../service/vector/summary-vector-index-types';
+import type { SummaryVectorIndexShard_ACU } from '../../shared/models/summary-vector-index';
 
 const DB_NAME_ACU = 'TavernDB_ACU_VectorTempCache';
 const DB_VERSION_ACU = 1;

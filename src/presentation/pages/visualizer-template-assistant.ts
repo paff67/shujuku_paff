@@ -159,20 +159,22 @@ function getPortalDocument_ACU(): Document | null {
  */
 function ensureAssistantHostPortal_ACU(mode: AssistantViewportMode_ACU, isOpen: boolean): void {
     const doc = getPortalDocument_ACU();
-    if (!doc) return;
+    if (!doc || typeof doc.getElementById !== 'function') return;
 
     const host = doc.getElementById(ASSISTANT_HOST_ID_ACU);
     if (!host) return;
 
-    const shouldPortal = mode === 'fullscreen-overlay' && isOpen;
-    const isInBody = host.parentElement === doc.body;
-    const dock = doc.querySelector(VISUALIZER_ASSISTANT_DOCK_SELECTOR_ACU);
+    const body = doc.body;
+    const canUseBodyPortal = !!body && typeof body.appendChild === 'function';
+    const shouldPortal = mode === 'fullscreen-overlay' && isOpen && canUseBodyPortal;
+    const isInBody = !!body && host.parentElement === body;
+    const dock = typeof doc.querySelector === 'function' ? doc.querySelector(VISUALIZER_ASSISTANT_DOCK_SELECTOR_ACU) : null;
 
     if (shouldPortal) {
         host.style.pointerEvents = 'auto';
         if (!isInBody) {
             host.style.cssText += `;${VIS_PORTAL_VARIABLES_ACU}`;
-            doc.body.appendChild(host);
+            body.appendChild(host);
         }
         return;
     }
@@ -218,9 +220,10 @@ function buildAssistantScrollFrameStyle_ACU(mode: AssistantViewportMode_ACU) {
     const isFullscreenInternalScroll = mode === 'fullscreen-overlay' && !isMobileViewport;
     const margin = mode === 'fullscreen-overlay' ? '8px 12px 8px' : '12px 14px 8px';
     const minHeight = mode === 'fullscreen-overlay' ? '180px' : '240px';
-    const flexValue = isDesktopInternalScroll || isFullscreenInternalScroll ? '1 1 auto' : '0 0 auto';
+    const usesInternalScroll = isDesktopInternalScroll || isFullscreenInternalScroll;
+    const flexValue = usesInternalScroll ? '1 1 auto' : '0 0 auto';
     const desktopMaxHeight = 'max-height:min(56vh, 640px);';
-    const overflow = isFullscreenInternalScroll ? 'overflow:hidden;' : 'overflow:visible;';
+    const overflow = usesInternalScroll ? 'overflow:hidden;' : 'overflow:visible;';
     const extra = mode === 'fullscreen-overlay'
         ? (isMobileViewport ? 'max-height:none;' : '')
         : desktopMaxHeight;
@@ -242,14 +245,14 @@ function buildAssistantFooterStyle_ACU(mode: AssistantViewportMode_ACU) {
     return `padding:${padding}; border-top:1px solid var(--vis-border-color); flex:0 0 auto;`;
 }
 
-function shouldShowFloatingRestore_ACU(_mode: AssistantViewportMode_ACU) {
-    return false;
+function shouldShowFloatingRestore_ACU(mode: AssistantViewportMode_ACU) {
+    return mode === 'fullscreen-overlay' && assistantUiState_ACU.isOpen && assistantUiState_ACU.isMinimized;
 }
 
 function isPanelVisible_ACU(mode: AssistantViewportMode_ACU) {
     if (!assistantUiState_ACU.isOpen) return false;
     if (mode !== 'fullscreen-overlay') return true;
-    return true;
+    return !assistantUiState_ACU.isMinimized;
 }
 
 function buildAssistantControlRowStyle_ACU(mode: AssistantViewportMode_ACU) {
@@ -1015,6 +1018,7 @@ export function renderVisualizerTemplateAssistantPanel_ACU() {
                     <div class="acu-hint" style="font-size:12px; margin-top:4px;">当前表：${escapeHtml_ACU(getSelectedSheetLabel_ACU())}</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                    ${mode === 'fullscreen-overlay' ? '<button id="acu-vis-assistant-minimize" class="acu-btn-secondary" type="button">最小化</button>' : ''}
                     <button id="acu-vis-assistant-close" class="acu-btn-secondary" type="button">关闭</button>
                 </div>
             </div>
@@ -1055,6 +1059,16 @@ export function renderVisualizerTemplateAssistantPanel_ACU() {
 
     $host.find('#acu-vis-assistant-close').on('click', () => {
         assistantUiState_ACU.isOpen = false;
+        assistantUiState_ACU.isMinimized = false;
+        renderVisualizerTemplateAssistantPanel_ACU();
+    });
+
+    $host.find('#acu-vis-assistant-minimize').on('click', () => {
+        assistantUiState_ACU.isMinimized = true;
+        renderVisualizerTemplateAssistantPanel_ACU();
+    });
+
+    $host.find('#acu-vis-assistant-restore').on('click', () => {
         assistantUiState_ACU.isMinimized = false;
         renderVisualizerTemplateAssistantPanel_ACU();
     });

@@ -42,6 +42,8 @@ export {
 export {
     mergeAllIndependentTables_ACU,
     formatJsonToReadable_ACU,
+    getReadableContentStartColumn_ACU,
+    hasReadableRowCellData_ACU,
     shouldSuppressWorldbookInjection_ACU,
     maybeLiftWorldbookSuppression_ACU,
     fillFirstLayerWithTemplateData_ACU,

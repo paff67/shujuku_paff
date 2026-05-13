@@ -6,7 +6,6 @@ import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { jQuery_API_ACU } from '../dom-utils';
 import { getCharLorebooks_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, isWorldbookApiAvailable_ACU } from '../../service/worldbook/worldbook-service';
-import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 import { settings_ACU, currentJsonTableData_ACU } from '../../service/runtime/state-manager';
 import { $popupInstance_ACU } from '../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
@@ -17,7 +16,7 @@ import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { setSummaryVectorIndexMode_ACU, setZeroTkOccupyMode_ACU } from '../../service/settings/settings-service';
 import { formatJsonToReadable_ACU } from '../../service/runtime/helpers-remaining';
-import { getCurrentVectorMemoryConfig_ACU, getDefaultVectorMemoryConfig_ACU } from '../../service/vector/vector-memory-config';
+import { getCurrentVectorMemoryConfig_ACU, getDefaultVectorMemoryConfig_ACU, updateGlobalVectorMemoryConfigFields_ACU } from '../../service/vector/vector-memory-config';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
@@ -120,14 +119,7 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
           logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; storage=${result.storageType}${result.warning ? `; warning=${result.warning}` : ''}${result.error ? `; error=${result.error}` : ''}`);
       };
       const updateVectorMemoryFields_ACU = (patch: Record<string, any>) => {
-          const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
-          globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
-          settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-          Object.keys(patch).forEach((field) => {
-              (globalMeta_ACU.vectorMemoryConfigGlobal as any)[field] = patch[field];
-          });
-          settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-          saveGlobalMeta_ACU();
+          updateGlobalVectorMemoryConfigFields_ACU(patch);
           const result = saveSettingsAndNotify_ACU();
           logVectorMemorySaveResult_ACU(Object.keys(patch), result);
       };

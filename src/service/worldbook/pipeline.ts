@@ -8,7 +8,9 @@ import { getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, mater
 import { getImportBatchPrefix_ACU, getImportStablePrefix_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { isEntryBlocked_ACU } from '../../shared/utils';
-import { formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
+import { formatJsonToReadable_ACU, getReadableContentStartColumn_ACU, hasReadableRowCellData_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
+import { isSqliteMode } from '../table/storage-mode';
+import { reloadStorageProvider, getStorageProvider } from '../table/table-storage-strategy';
 import { allocConsecutiveOrderBlock_ACU, applyPlacementToEntry_ACU, buildDefaultGlobalInjectionConfig_ACU, buildUsedOrderSet_ACU, ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU, getEntryOrderNumber_ACU, getFixedPlacementDefaultsForTable_ACU, getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU, isEntryPlacementMatched_ACU, normalizeLorebookPosition_ACU, normalizePlacementConfig_ACU, updateCustomTableExports_ACU, updateImportantPersonsRelatedEntries_ACU, updateOutlineTableEntry_ACU, updateSummaryTableEntries_ACU } from './injection-engine';
 // pipeline.ts
 // 从 05_core_tail.js 迁入
@@ -40,16 +42,25 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
         // 外部导入时，直接使用 currentJsonTableData_ACU
         mergedData = currentJsonTableData_ACU;
     } else {
-        // 正常更新时，使用全表合并逻辑从整段聊天记录提取每张表的最新版本
+        // 正常更新时，SQL 模式必须从 provider 取当前数据，避免世界书刷新反向覆盖 SQLite 视图。
         await loadAllChatMessages_ACU();
-        const mergedFromHistory = await mergeAllIndependentTables_ACU();
-        if (mergedFromHistory) {
-            mergedData = mergedFromHistory;
-            // 同步内存中的全局数据，确保后续调用保持一致
-            _set_currentJsonTableData_ACU(mergedFromHistory);
+        if (isSqliteMode()) {
+            try {
+                mergedData = getStorageProvider().getCurrentData();
+            } catch (e: any) {
+                logWarn_ACU(`[Worldbook] SQLite provider getCurrentData failed, fallback to current JSON view: ${e?.message}`);
+                mergedData = currentJsonTableData_ACU;
+            }
         } else {
-            // 如果合并失败，退回到当前内存数据避免中断
-            mergedData = currentJsonTableData_ACU;
+            const mergedFromHistory = await mergeAllIndependentTables_ACU();
+            if (mergedFromHistory) {
+                mergedData = mergedFromHistory;
+                // 同步内存中的全局数据，确保后续调用保持一致
+                _set_currentJsonTableData_ACU(mergedFromHistory);
+            } else {
+                // 如果合并失败，退回到当前内存数据避免中断
+                mergedData = currentJsonTableData_ACU;
+            }
         }
     }
 
@@ -66,22 +77,10 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
             const table = data[sheetKey];
             const content = table?.content;
             if (!Array.isArray(content) || content.length <= 1) continue;
+            const headerRow = Array.isArray(content[0]) ? content[0] : [];
+            const startColumn = getReadableContentStartColumn_ACU(headerRow);
             for (let r = 1; r < content.length; r++) {
-                const row = content[r];
-                if (!Array.isArray(row)) continue;
-                for (let c = 1; c < row.length; c++) {
-                    const cell = row[c];
-                    if (cell === null || cell === undefined) continue;
-                    if (typeof cell === 'string') {
-                        if (cell.trim() !== '') return true;
-                    } else if (typeof cell === 'number') {
-                        if (!Number.isNaN(cell)) return true;
-                    } else if (typeof cell === 'boolean') {
-                        return true;
-                    } else {
-                        return true;
-                    }
-                }
+                if (hasReadableRowCellData_ACU(content[r], startColumn)) return true;
             }
         }
         return false;
@@ -544,6 +543,24 @@ export   async function deleteAllGeneratedEntries_ACU(targetLorebook: string | n
 export   async function refreshMergedDataAndNotify_ACU() {
       // 重新加载聊天记录
     await loadAllChatMessages_ACU();
+
+    // SQL 模式必须以 Storage Provider 为当前数据源。
+    // 直接 merge 后写 currentJsonTableData_ACU 会绕过 SQLite 内存库，导致提示词看到的 JSON
+    // 与后续 SQL applyEdits 操作的数据库不是同一份状态。
+    if (isSqliteMode()) {
+        try {
+            await reloadStorageProvider();
+            const providerData = getStorageProvider().getCurrentData();
+            if (providerData) {
+                logDebug_ACU('[Refresh] SQLite provider data loaded and synchronized to JSON view.');
+                await updateReadableLorebookEntry_ACU(true);
+                logDebug_ACU('Updated worldbook entries with SQLite provider data.');
+                return { mergedData: currentJsonTableData_ACU, integrityFixed: false };
+            }
+        } catch (e: any) {
+            logError_ACU(`[Refresh] SQLite provider refresh failed: ${e?.message}`);
+        }
+    }
       
     // 合并数据 (使用新的独立表合并逻辑)
     let mergedData = await mergeAllIndependentTables_ACU();

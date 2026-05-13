@@ -403,12 +403,23 @@ export async function executeManualMergeSummary_ACU(
             return { success: false, error: mergeResult.error || '合并失败' };
         }
 
+        const beforeDataForSave = currentJsonTableData_ACU
+            ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+            : null;
+
         // 写入结果
         applyMergeResult_ACU(summaryKey!, mergeResult.accumulatedSummary, startIndex!, actualEndIndex!);
 
         // 保存到聊天记录
         const keysToSave = [summaryKey!];
-        await saveIndependentTableToChatHistory_ACU(getLastMessageIndex_ACU(), keysToSave, keysToSave);
+        await saveIndependentTableToChatHistory_ACU({
+            targetMessageIndex: getLastMessageIndex_ACU(),
+            targetSheetKeys: keysToSave,
+            updateGroupKeys: keysToSave,
+            beforeData: beforeDataForSave,
+            afterData: currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null,
+            trackAsUpdate: true,
+        });
 
         // 更新世界书
         await updateReadableLorebookEntry_ACU(true);

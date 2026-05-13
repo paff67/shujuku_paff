@@ -26,6 +26,7 @@ const {
   mockCloneIsolatedData,
   mockWriteIsolatedTagData,
   mockWriteMessageIdentity,
+  mockInitIsolatedTagSlot,
   mockWriteLegacyCompatData,
   mockWriteLegacyStandardAndSummary,
   mockReadIsolatedTagData,
@@ -61,12 +62,30 @@ const {
     mockDeleteAllGeneratedEntries: vi.fn().mockResolvedValue(undefined),
     mockMergeAllIndependentTables: vi.fn(),
     mockCloneIsolatedData: vi.fn(() => ({})),
-    mockWriteIsolatedTagData: vi.fn(),
+    mockWriteIsolatedTagData: vi.fn((msg: any, isolationKey: string, tagData: any) => {
+      if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
+        msg.TavernDB_ACU_IsolatedData = {};
+      }
+      msg.TavernDB_ACU_IsolatedData[isolationKey] = tagData;
+    }),
     mockWriteMessageIdentity: vi.fn(),
+    mockInitIsolatedTagSlot: vi.fn((msg: any, isolationKey: string) => {
+      if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
+        msg.TavernDB_ACU_IsolatedData = {};
+      }
+      if (!msg.TavernDB_ACU_IsolatedData[isolationKey]) {
+        msg.TavernDB_ACU_IsolatedData[isolationKey] = {
+          independentData: {},
+          modifiedKeys: [],
+          updateGroupKeys: [],
+        };
+      }
+      return msg.TavernDB_ACU_IsolatedData[isolationKey];
+    }),
     mockWriteLegacyCompatData: vi.fn(),
     mockWriteLegacyStandardAndSummary: vi.fn(),
-    mockReadIsolatedTagData: vi.fn(() => null),
-    mockReadLegacyIndependentData: vi.fn(() => null),
+    mockReadIsolatedTagData: vi.fn((): any => null),
+    mockReadLegacyIndependentData: vi.fn((): any => null),
     mockIsLegacyMatchForIsolation: vi.fn(() => false),
   };
 });
@@ -117,6 +136,7 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: mockCloneIsolatedData,
   writeIsolatedTagData_ACU: mockWriteIsolatedTagData,
   writeMessageIdentity_ACU: mockWriteMessageIdentity,
+  initIsolatedTagSlot_ACU: mockInitIsolatedTagSlot,
   writeLegacyCompatData_ACU: mockWriteLegacyCompatData,
   writeLegacyStandardAndSummary_ACU: mockWriteLegacyStandardAndSummary,
   readIsolatedTagData_ACU: mockReadIsolatedTagData,
@@ -126,6 +146,7 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
 
 import {
   saveIndependentTableToChatHistory_ACU,
+  persistTablesToChatMessage_ACU,
   checkIfFirstTimeInit_ACU,
   loadOrCreateJsonTableFromChatHistory_ACU,
 } from '../../../src/service/table/table-service';
@@ -170,7 +191,7 @@ describe('saveIndependentTableToChatHistory_ACU', () => {
     expect(result.error).toContain('no AI message');
   });
 
-  it('正常保存到最后一条 AI 消息，写入隔离数据和 legacy 数据', async () => {
+  it('正常保存到最后一条 AI 消息，写入 V2 delta 且不写 legacy 数据', async () => {
     const aiMsg: any = { is_user: false, mes: 'AI回复' };
     mockGetChatArray.mockReturnValue([
       { is_user: true, mes: '用户消息' },
@@ -181,11 +202,22 @@ describe('saveIndependentTableToChatHistory_ACU', () => {
 
     expect(result.saved).toBe(true);
     expect(result.messageIndex).toBe(1);
-    // 验证隔离数据写入
+    // 验证隔离元数据仍写入，但表格正文进入 V2 delta，而不是 legacy 快照。
     expect(mockWriteIsolatedTagData).toHaveBeenCalledTimes(1);
     expect(mockWriteMessageIdentity).toHaveBeenCalledTimes(1);
-    expect(mockWriteLegacyCompatData).toHaveBeenCalledTimes(1);
-    expect(mockWriteLegacyStandardAndSummary).toHaveBeenCalledTimes(1);
+    expect(mockWriteLegacyCompatData).not.toHaveBeenCalled();
+    expect(mockWriteLegacyStandardAndSummary).not.toHaveBeenCalled();
+
+    const layer = aiMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+    expect(layer?.version).toBe(2);
+    expect(layer?.delta?.kind).toBe('delta');
+    expect(layer?.delta?.changedSheets).toEqual(['sheet_0', 'sheet_1']);
+    expect(layer?.delta?.changesBySheet.sheet_0.rowChanges).toEqual([
+      expect.objectContaining({ op: 'upsert', rowId: '1' }),
+    ]);
+    expect(layer?.delta?.changesBySheet.sheet_1.rowChanges).toEqual([
+      expect.objectContaining({ op: 'upsert', rowId: '1' }),
+    ]);
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
   });
 
@@ -210,12 +242,136 @@ describe('saveIndependentTableToChatHistory_ACU', () => {
     const result = await saveIndependentTableToChatHistory_ACU(-1, ['sheet_1'], ['group_A']);
 
     expect(result.saved).toBe(true);
-    // writeIsolatedTagData 应被调用，且 tagData 中 modifiedKeys 包含 sheet_1
+    // writeIsolatedTagData 应被调用，且 tagData 中 modifiedKeys 包含 sheet_1。
     expect(mockWriteIsolatedTagData).toHaveBeenCalledTimes(1);
     const writtenTagData = mockWriteIsolatedTagData.mock.calls[0][2];
     expect(writtenTagData.modifiedKeys).toContain('sheet_0');
     expect(writtenTagData.modifiedKeys).toContain('sheet_1');
     expect(writtenTagData.updateGroupKeys).toContain('group_A');
+
+    const layer = aiMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+    expect(layer?.version).toBe(2);
+    expect(layer?.delta?.changedSheets).toEqual(['sheet_1']);
+    expect(layer?.delta?.modifiedKeys).toEqual(['sheet_1']);
+    expect(layer?.delta?.updateGroupKeys).toEqual(['group_A']);
+    expect(layer?.delta?.changesBySheet.sheet_1.rowChanges).toEqual([
+      expect.objectContaining({ op: 'upsert', rowId: '1' }),
+    ]);
+    expect(mockWriteLegacyCompatData).not.toHaveBeenCalled();
+    expect(mockWriteLegacyStandardAndSummary).not.toHaveBeenCalled();
+  });
+
+  it('阻止 afterData 缺失目标表时把已有真实数据落盘成 clearSheet，并保证回退重建仍保留上一轮数据', async () => {
+    const rootMsg: any = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          independentData: {},
+          modifiedKeys: [],
+          updateGroupKeys: [],
+          tablePersistenceV2: {
+            version: 2,
+            checkpoint: {
+              kind: 'checkpoint',
+              version: 2,
+              checkpointId: 'checkpoint-root',
+              createdAt: '2026-05-09T00:00:00.000Z',
+              source: 'template-seed',
+              isolationKey: '',
+              messageIndexHint: 0,
+              data: {
+                mate: { type: 'chatSheets' },
+                sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+              },
+            },
+          },
+        },
+      },
+    };
+    const targetMsg: any = { is_user: false, mes: '第二轮 AI 回复' };
+    const chat = [rootMsg, { is_user: true, mes: '用户消息' }, targetMsg];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const beforeData = {
+      mate: { type: 'chatSheets' },
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+    } as any;
+    const afterData = {
+      mate: { type: 'chatSheets' },
+    } as any;
+
+    const result = await persistTablesToChatMessage_ACU({
+      targetMessageIndex: 2,
+      targetSheetKeys: ['sheet_0'],
+      updateGroupKeys: ['sheet_0'],
+      trackingSheetKeys: ['sheet_0'],
+      beforeData,
+      afterData,
+    });
+
+    expect(result.saved).toBe(true);
+    const layer = targetMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+    expect(layer?.delta).toBeUndefined();
+    expect(rootMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2?.checkpoint?.data?.sheet_0?.content)
+      .toEqual([['row_id', '物品名'], ['1', '铁剑']]);
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it('阻止 afterData 仅剩表头时把已有真实数据落盘成删除全部行', async () => {
+    const aiMsg: any = { is_user: false, mes: '第二轮 AI 回复' };
+    mockGetChatArray.mockReturnValue([aiMsg]);
+
+    const beforeData = {
+      mate: { type: 'chatSheets' },
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+    } as any;
+    const afterData = {
+      mate: { type: 'chatSheets' },
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名']] },
+    } as any;
+
+    const result = await persistTablesToChatMessage_ACU({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_0'],
+      updateGroupKeys: ['sheet_0'],
+      trackingSheetKeys: ['sheet_0'],
+      beforeData,
+      afterData,
+    });
+
+    expect(result.saved).toBe(true);
+    const layer = aiMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+    expect(layer?.delta).toBeUndefined();
+  });
+
+  it('显式允许清空时仍可写入 clear/delete delta，避免破坏合法清空语义', async () => {
+    const aiMsg: any = { is_user: false, mes: '清空表 AI 回复' };
+    mockGetChatArray.mockReturnValue([aiMsg]);
+
+    const beforeData = {
+      mate: { type: 'chatSheets' },
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+    } as any;
+    const afterData = {
+      mate: { type: 'chatSheets' },
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名']] },
+    } as any;
+
+    const result = await persistTablesToChatMessage_ACU({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_0'],
+      updateGroupKeys: ['sheet_0'],
+      trackingSheetKeys: ['sheet_0'],
+      beforeData,
+      afterData,
+      allowClearingTargetSheets: true,
+    });
+
+    expect(result.saved).toBe(true);
+    const layer = aiMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+    expect(layer?.delta?.changesBySheet.sheet_0.rowChanges).toEqual([
+      { op: 'delete', rowId: '1', rowIndexHint: 1 },
+    ]);
   });
 });
 

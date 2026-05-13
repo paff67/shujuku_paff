@@ -14,10 +14,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 // ═══════════════════════════════════════════════════════════════
 
 // mock log 函数
+const { mockLogError } = vi.hoisted(() => ({
+  mockLogError: vi.fn(),
+}));
 vi.mock('../../../src/shared/utils', () => ({
-  logDebug_ACU: vi.fn(),
+      logDebug_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
-  logError_ACU: vi.fn(),
+  logError_ACU: mockLogError,
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
   parseTableTemplateJson_ACU: vi.fn(() => null),
   stripSeedRowsFromTemplate_ACU: vi.fn((obj: any) => {
@@ -47,8 +50,20 @@ vi.mock('../../../src/service/table/table-service', () => ({
 
 // mock helpers-data-merge
 const mockMergeAll = vi.fn();
+const mockMergeAllWithMeta = vi.fn(async (...args: any[]) => {
+  const data = await mockMergeAll(...args);
+  return {
+    data,
+    usedLegacyMigration: false,
+    changed: false,
+    foundSheetCount: data && typeof data === 'object'
+      ? Object.keys(data).filter(k => k.startsWith('sheet_')).length
+      : 0,
+  };
+});
 vi.mock('../../../src/service/runtime/helpers-data-merge', () => ({
   mergeAllIndependentTables_ACU: (...args: any[]) => mockMergeAll(...args),
+  mergeAllIndependentTablesWithMeta_ACU: (...args: any[]) => mockMergeAllWithMeta(...args),
 }));
 
 // mock name-mapper
@@ -314,11 +329,89 @@ describe('SqlTableService', () => {
       expect(result.source).toBe('empty');
     });
 
+    it('新开卡无数据后 getCurrentData 不应触发 _acu_sheet_meta 缺失错误或提前创建用户表', async () => {
+      mockMergeAll.mockResolvedValue(null);
+      await service.loadFromChat();
+
+      const currentData = service.getCurrentData();
+
+      expect(currentData).toEqual({
+        mate: {
+          type: 'acu',
+          version: 1,
+          updateConfigUiSentinel: 0,
+          globalInjectionConfig: {
+            readableEntryPlacement: { position: '', depth: 0, order: 0 },
+            wrapperPlacement: { position: '', depth: 0, order: 0 },
+          },
+        },
+      });
+      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
+      expect(mockLogError).not.toHaveBeenCalledWith(
+        expect.stringContaining('[SQLite引擎] query 执行失败:'),
+        expect.stringContaining('SELECT * FROM _acu_sheet_meta'),
+        expect.anything(),
+        expect.stringContaining('no such table: _acu_sheet_meta'),
+      );
+    });
+
+    it('空壳结构 getCurrentData 后应保留表头视图且不提前创建用户表', async () => {
+      const headerOnlyData = JSON.parse(JSON.stringify({
+        ...testTableData,
+        sheet_0: {
+          ...testTableData.sheet_0,
+          content: [['row_id', 'item_name', 'quantity']],
+        },
+      }));
+      mockMergeAll.mockResolvedValue(headerOnlyData);
+      await service.loadFromChat();
+
+      const currentData = service.getCurrentData();
+
+      expect(currentData).toHaveProperty('sheet_0');
+      expect((currentData as any).sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
+      expect(mockLogError).not.toHaveBeenCalledWith(
+        expect.stringContaining('[SQLite引擎] query 执行失败:'),
+        expect.stringContaining('SELECT * FROM _acu_sheet_meta'),
+        expect.anything(),
+        expect.stringContaining('no such table: _acu_sheet_meta'),
+      );
+    });
+
     it('有数据时成功加载', async () => {
       mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
       const result = await service.loadFromChat();
       expect(result.loaded).toBe(true);
       expect(result.source).toBe('merged');
+    });
+
+    it('legacy migration 结果即使只有表头也应加载 SQLite，避免旧聊天被显示为空', async () => {
+      const migratedLegacyHeaderOnlyData = JSON.parse(JSON.stringify({
+        ...testTableData,
+        sheet_0: {
+          ...testTableData.sheet_0,
+          content: [['row_id', 'item_name', 'quantity']],
+        },
+      }));
+      mockMergeAllWithMeta.mockResolvedValueOnce({
+        data: migratedLegacyHeaderOnlyData,
+        usedLegacyMigration: true,
+        changed: true,
+        foundSheetCount: 1,
+      });
+
+      const result = await service.loadFromChat();
+
+      expect(result.loaded).toBe(true);
+      expect(result.source).toBe('merged');
+      const queryResult = service.executeQuery('SELECT * FROM inventory');
+      expect(queryResult.rowCount).toBe(0);
+      const schemaResult = service.executeQuery('PRAGMA table_info(inventory)');
+      const schemaColumnNames = schemaResult.values.map(row => row[1]);
+      expect(schemaColumnNames).toContain('item_name');
+      expect(schemaColumnNames).toContain('quantity');
     });
 
     it('加载后可以执行查询', async () => {
@@ -764,6 +857,69 @@ describe('SqlTableService', () => {
       expect(result).not.toBeNull();
       expect(result).toHaveProperty('sheet_0');
     });
+
+    it('首次写入物化用户表后 getCurrentData 应采用 SQLite 导出的真实数据', async () => {
+      const headerOnlyData = JSON.parse(JSON.stringify({
+        ...testTableData,
+        sheet_0: {
+          ...testTableData.sheet_0,
+          content: [['row_id', 'item_name', 'quantity']],
+        },
+      }));
+      mockMergeAll.mockResolvedValue(headerOnlyData);
+      await service.loadFromChat();
+
+      const result = service.applyEdits("INSERT INTO inventory VALUES (1, '铁剑', 3);");
+      expect(result.success).toBe(true);
+
+      const currentData = service.getCurrentData();
+      expect((currentData as any).sheet_0.content).toContainEqual(['1', '铁剑', '3']);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // replaceCurrentData
+  // ═══════════════════════════════════════════════════════════════
+  describe('replaceCurrentData', () => {
+    it('用批次 JSON 快照重建 SQLite，并清除旧内存库数据', async () => {
+      mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
+      await service.loadFromChat();
+      expect(service.executeQuery('SELECT COUNT(*) AS count FROM inventory').values[0][0]).toBe(2);
+
+      const batchData = JSON.parse(JSON.stringify(testTableData));
+      batchData.sheet_0.content = [
+        ['row_id', 'item_name', 'quantity'],
+        ['9', '旧聊天铁剑', '1'],
+      ];
+
+      await service.replaceCurrentData(batchData);
+      const queryResult = service.executeQuery('SELECT row_id, item_name, quantity FROM inventory');
+      expect(queryResult.values).toEqual([[9, '旧聊天铁剑', 1]]);
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual([
+        ['row_id', 'item_name', 'quantity'],
+        ['9', '旧聊天铁剑', '1'],
+      ]);
+    });
+
+    it('连续 replaceCurrentData 加载同名表时不应因旧表残留失败', async () => {
+      const firstBatch = JSON.parse(JSON.stringify(testTableData));
+      firstBatch.sheet_0.content = [
+        ['row_id', 'item_name', 'quantity'],
+        ['1', '第一批铁剑', '2'],
+      ];
+
+      const secondBatch = JSON.parse(JSON.stringify(testTableData));
+      secondBatch.sheet_0.content = [
+        ['row_id', 'item_name', 'quantity'],
+        ['1', '第二批银剑', '4'],
+      ];
+
+      await service.replaceCurrentData(firstBatch);
+      expect(service.executeQuery('SELECT item_name, quantity FROM inventory').values).toEqual([['第一批铁剑', 2]]);
+
+      await expect(service.replaceCurrentData(secondBatch)).resolves.toBeUndefined();
+      expect(service.executeQuery('SELECT item_name, quantity FROM inventory').values).toEqual([['第二批银剑', 4]]);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -775,20 +931,144 @@ describe('SqlTableService', () => {
       await service.loadFromChat();
     });
 
-    it('成功保存到聊天', async () => {
+    it('成功保存到聊天并传入 committed before 与导出 after', async () => {
       const result = await service.saveToChat();
       expect(result.saved).toBe(true);
-      expect(mockSaveIndependentTable).toHaveBeenCalled();
+      expect(mockSaveIndependentTable).toHaveBeenCalledTimes(1);
+      const options = mockSaveIndependentTable.mock.calls[0][0];
+      expect(options.targetMessageIndex).toBe(-1);
+      expect(options.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+      expect(options.afterData.sheet_0.content).toEqual(testTableData.sheet_0.content);
     });
 
     it('传递 targetSheetKeys 参数', async () => {
       await service.saveToChat(['sheet_0'], ['group_1']);
-      expect(mockSaveIndependentTable).toHaveBeenCalledWith(-1, ['sheet_0'], ['group_1']);
+      expect(mockSaveIndependentTable).toHaveBeenCalledWith(expect.objectContaining({
+        targetMessageIndex: -1,
+        targetSheetKeys: ['sheet_0'],
+        updateGroupKeys: ['group_1'],
+      }));
     });
 
     it('null 参数转为 null', async () => {
       await service.saveToChat(null, null);
-      expect(mockSaveIndependentTable).toHaveBeenCalledWith(-1, null, null);
+      expect(mockSaveIndependentTable).toHaveBeenCalledWith(expect.objectContaining({
+        targetMessageIndex: -1,
+        targetSheetKeys: null,
+        updateGroupKeys: null,
+      }));
+    });
+
+    it('多次 mutation 后一次保存使用首次 mutation 前的 beforeData', async () => {
+      service.executeMutation('UPDATE inventory SET quantity = 10 WHERE row_id = 1');
+      service.executeMutation("INSERT INTO inventory VALUES (3, '魔法书', 1)");
+
+      await service.saveToChat(['sheet_0'], ['sheet_0']);
+
+      const options = mockSaveIndependentTable.mock.calls[0][0];
+      expect(options.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+      expect(options.afterData.sheet_0.content).toContainEqual(['1', '铁剑', '10']);
+      expect(options.afterData.sheet_0.content).toContainEqual(['3', '魔法书', '1']);
+    });
+
+    it('applyEdits 执行多条 UPDATE 与 INSERT 时应保留全部既有行', async () => {
+      const result = service.applyEdits(`
+        UPDATE inventory SET quantity = 10 WHERE row_id = 1;
+        UPDATE inventory SET quantity = 6 WHERE row_id = 2;
+        INSERT INTO inventory VALUES (3, '魔法书', 1);
+      `);
+
+      expect(result.success).toBe(true);
+      expect(result.appliedEdits).toBe(3);
+
+      const currentData = service.getCurrentData();
+      expect((currentData as any).sheet_0.content).toContainEqual(['1', '铁剑', '10']);
+      expect((currentData as any).sheet_0.content).toContainEqual(['2', '治疗药水', '6']);
+      expect((currentData as any).sheet_0.content).toContainEqual(['3', '魔法书', '1']);
+    });
+
+    it('保存失败时保留 pending before，下一次保存仍使用同一 beforeData', async () => {
+      mockSaveIndependentTable
+        .mockResolvedValueOnce({ saved: false, error: '写入失败' })
+        .mockResolvedValueOnce({ saved: true, messageIndex: 6 });
+
+      service.executeMutation('UPDATE inventory SET quantity = 10 WHERE row_id = 1');
+      const failed = await service.saveToChat(['sheet_0'], ['sheet_0']);
+      expect(failed.saved).toBe(false);
+
+      service.executeMutation('UPDATE inventory SET quantity = 11 WHERE row_id = 1');
+      const saved = await service.saveToChat(['sheet_0'], ['sheet_0']);
+      expect(saved.saved).toBe(true);
+
+      const firstOptions = mockSaveIndependentTable.mock.calls[0][0];
+      const secondOptions = mockSaveIndependentTable.mock.calls[1][0];
+      expect(firstOptions.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+      expect(secondOptions.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+      expect(secondOptions.afterData.sheet_0.content).toContainEqual(['1', '铁剑', '11']);
+    });
+
+    it('成功保存后重置 committed snapshot，后续 mutation 的 beforeData 来自上次保存后的状态', async () => {
+      service.executeMutation('UPDATE inventory SET quantity = 10 WHERE row_id = 1');
+      await service.saveToChat(['sheet_0'], ['sheet_0']);
+
+      service.executeMutation('UPDATE inventory SET quantity = 11 WHERE row_id = 1');
+      await service.saveToChat(['sheet_0'], ['sheet_0']);
+
+      const secondOptions = mockSaveIndependentTable.mock.calls[1][0];
+      expect(secondOptions.beforeData.sheet_0.content).toContainEqual(['1', '铁剑', '10']);
+      expect(secondOptions.afterData.sheet_0.content).toContainEqual(['1', '铁剑', '11']);
+    });
+
+    it('空 applyEdits 不创建 pending before', async () => {
+      service.applyEdits('   ');
+      await service.saveToChat(['sheet_0'], ['sheet_0']);
+      const options = mockSaveIndependentTable.mock.calls[0][0];
+      expect(options.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+      expect(options.afterData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+    });
+
+    it('首次写入前保存空壳结构时不应把 afterData 覆盖成 mate-only', async () => {
+      service.dispose();
+      service = new SqlTableService();
+      const headerOnlyData = JSON.parse(JSON.stringify({
+        ...testTableData,
+        sheet_0: {
+          ...testTableData.sheet_0,
+          content: [['row_id', 'item_name', 'quantity']],
+        },
+      }));
+      mockMergeAll.mockResolvedValue(headerOnlyData);
+      await service.loadFromChat();
+
+      await service.saveToChat(['sheet_0'], ['sheet_0']);
+
+      const options = mockSaveIndependentTable.mock.calls[0][0];
+      expect(options.afterData).toHaveProperty('sheet_0');
+      expect(options.afterData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
+    });
+
+    it('replaceCurrentData 收到空壳批次后保存时应把清空防线参数传给持久化层', async () => {
+      const headerOnlyData = JSON.parse(JSON.stringify({
+        ...testTableData,
+        sheet_0: {
+          ...testTableData.sheet_0,
+          content: [['row_id', 'item_name', 'quantity']],
+        },
+      }));
+
+      await service.replaceCurrentData(headerOnlyData);
+      await service.saveToChat({
+        targetSheetKeys: ['sheet_0'],
+        updateGroupKeys: ['sheet_0'],
+        beforeData: testTableData as any,
+      });
+
+      const options = mockSaveIndependentTable.mock.calls[0][0];
+      expect(options.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
+      expect(options.afterData.sheet_0.content).toEqual([['row_id']]);
+      expect(options.allowClearingTargetSheets).toBeUndefined();
     });
   });
 

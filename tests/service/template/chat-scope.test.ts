@@ -145,14 +145,18 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   isLegacyMatchForIsolation_ACU: vi.fn(() => false),
 }));
 
-vi.mock('../../../src/service/plot/plot-logic', () => ({
-  ensurePlotPromptsArray_ACU: mockEnsurePlotPromptsArray,
-  ensureLoopPromptsArray_ACU: mockEnsureLoopPromptsArray,
-  ensurePlotTasksCompat_ACU: mockEnsurePlotTasksCompat,
-  getPlotFinalDirectiveFromSource_ACU: mockGetPlotFinalDirectiveFromSource,
-  normalizePlotPresetSelectionValue_ACU: mockNormalizePlotPresetSelectionValue,
-  setPlotPromptContentByIdForSettings_ACU: mockSetPlotPromptContentById,
-}));
+vi.mock('../../../src/service/plot/plot-logic', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/service/plot/plot-logic')>();
+  return {
+    ...actual,
+    ensurePlotPromptsArray_ACU: mockEnsurePlotPromptsArray,
+    ensureLoopPromptsArray_ACU: mockEnsureLoopPromptsArray,
+    ensurePlotTasksCompat_ACU: mockEnsurePlotTasksCompat,
+    getPlotFinalDirectiveFromSource_ACU: mockGetPlotFinalDirectiveFromSource,
+    normalizePlotPresetSelectionValue_ACU: mockNormalizePlotPresetSelectionValue,
+    setPlotPromptContentByIdForSettings_ACU: mockSetPlotPromptContentById,
+  };
+});
 
 // mock chat-scope 内部跨文件依赖
 vi.mock('../../../src/service/template/chat-scope/chat-scope-template', () => ({

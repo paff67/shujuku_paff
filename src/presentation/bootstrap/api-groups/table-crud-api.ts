@@ -303,6 +303,10 @@ function parseDeleteRowArgs_ACU(
     };
 }
 
+function cloneCurrentTableDataForPersist_ACU(): any | null {
+    return currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null;
+}
+
 function assertSqlMutationChanged_ACU(
     methodName: string,
     actionLabel: string,
@@ -379,6 +383,7 @@ async function saveToLatestFloorAndRefresh(
     ctx: ApiGroupContext,
     methodName: string,
     options: TableCrudMutationOptions_ACU = { skipChatSave: false, skipNotify: false },
+    beforeData: any | null = null,
 ): Promise<void> {
     const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, tableName);
     let didNotifyThroughRefresh = false;
@@ -394,12 +399,14 @@ async function saveToLatestFloorAndRefresh(
                 settings: settings_ACU,
             });
             const shouldTrackAsUpdate = history.latestDataMessageIndex === -1;
-            await saveIndependentTableToChatHistory_ACU(
-                tableLatestFloorIndex,
-                [targetSheetKey],
-                shouldTrackAsUpdate ? [targetSheetKey] : null,
-                true,
-            );
+            await saveIndependentTableToChatHistory_ACU({
+                targetMessageIndex: tableLatestFloorIndex,
+                targetSheetKeys: [targetSheetKey],
+                updateGroupKeys: shouldTrackAsUpdate ? [targetSheetKey] : null,
+                beforeData,
+                afterData: cloneCurrentTableDataForPersist_ACU(),
+                trackAsUpdate: true,
+            });
         }
         await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify });
         didNotifyThroughRefresh = !options.skipNotify;
@@ -484,6 +491,8 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     return false;
                 }
 
+                const beforeData = cloneCurrentTableDataForPersist_ACU();
+
                 if (isSqliteMode()) {
                     // SQLite 模式：用英文物理表名和英文列名生成 UPDATE SQL；值统一走参数绑定，避免 row_id/单元格值字符串破坏 SQL。
                     const rowId = targetSheet.content[normalizedRowIndex][0]; // row_id 是第一列
@@ -517,7 +526,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     logDebug_ACU(`updateCell: Updated [${tableName}] row ${normalizedRowIndex}, col ${normalizedColIdentifier} = ${normalizedValue}`);
                 }
 
-                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateCell', { skipChatSave, skipNotify });
+                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateCell', { skipChatSave, skipNotify }, beforeData);
 
                 return true;
             } catch (e) {
@@ -555,6 +564,8 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 }
 
                 const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
+
+                const beforeData = cloneCurrentTableDataForPersist_ACU();
 
                 if (isSqliteMode()) {
                     // SQLite 模式：用英文物理表名和英文列名生成 UPDATE SQL
@@ -620,7 +631,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     logDebug_ACU(`updateRow: Updated ${updated} cells in [${tableName}] row ${normalizedRowIndex}`);
                 }
 
-                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateRow', { skipChatSave, skipNotify });
+                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateRow', { skipChatSave, skipNotify }, beforeData);
 
                 return true;
             } catch (e) {
@@ -654,6 +665,8 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
                 const headers = targetSheet.content[0] || [];
 
+                const beforeData = cloneCurrentTableDataForPersist_ACU();
+
                 if (isSqliteMode()) {
                     // SQLite 模式：用英文物理表名和英文列名生成 INSERT SQL
                     const beforeLength = targetSheet.content.length;
@@ -684,7 +697,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     const newIndex = refreshedLength - 1;
                     logDebug_ACU(`insertRow: [SQLite] Inserted row in [${englishTableName}] at index ${newIndex}`);
 
-                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify });
+                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify }, beforeData);
                     return newIndex;
                 } else {
                     // 原生模式：直接操作 JSON 数组，用中文列名在 headers 中定位
@@ -703,7 +716,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
 
                     logDebug_ACU(`insertRow: Inserted row at index ${newIndex} in [${tableName}]`);
 
-                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify });
+                    await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow', { skipChatSave, skipNotify }, beforeData);
 
                     return newIndex;
                 }
@@ -747,6 +760,8 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     return false;
                 }
 
+                const beforeData = cloneCurrentTableDataForPersist_ACU();
+
                 if (isSqliteMode()) {
                     // SQLite 模式：用英文物理表名生成 DELETE SQL；row_id 走参数绑定，避免字符串 row_id 删除失效。
                     const rowId = targetSheet.content[normalizedRowIndex]?.[0];
@@ -766,7 +781,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     logDebug_ACU(`deleteRow: Deleted row ${normalizedRowIndex} from [${tableName}]`);
                 }
 
-                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'deleteRow', { skipChatSave, skipNotify });
+                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'deleteRow', { skipChatSave, skipNotify }, beforeData);
 
                 return true;
             } catch (e) {

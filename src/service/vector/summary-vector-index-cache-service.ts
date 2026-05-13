@@ -1,6 +1,12 @@
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
-import { deleteVectorIndexCacheByIndex_ACU } from '../../data/storage/vector-index-temp-cache';
-import { deleteSummaryVectorHotCacheByIndex_ACU } from '../../data/storage/vector-index-hot-cache';
+import { clearVectorIndexTempCache_ACU, deleteVectorIndexCacheByIndex_ACU } from '../../data/storage/vector-index-temp-cache';
+import {
+    clearSummaryVectorFlushTasksByScope_ACU,
+    clearSummaryVectorHotCache_ACU,
+    deleteSummaryVectorHotCacheByIndex_ACU,
+    deleteSummaryVectorHotCacheByScope_ACU,
+} from '../../data/storage/vector-index-hot-cache';
+import type { SummaryVectorIndexSafeGcScopeHint_ACU } from './summary-vector-index-types';
 import { getLatestSummaryVectorIndexSnapshotState_ACU } from './summary-vector-index-state-service';
 import { loadSummaryVectorIndexChunksFromManifest_ACU } from './summary-vector-index-storage-service';
 
@@ -56,6 +62,16 @@ export async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_
     await deleteVectorIndexCacheByIndex_ACU(params.indexId);
     await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
     return false;
+}
+
+export async function clearAllSummaryVectorIndexCaches_ACU(): Promise<void> {
+    await clearVectorIndexTempCache_ACU();
+    await clearSummaryVectorHotCache_ACU();
+}
+
+export async function clearSummaryVectorIndexScopeCaches_ACU(scope: SummaryVectorIndexSafeGcScopeHint_ACU): Promise<void> {
+    await deleteSummaryVectorHotCacheByScope_ACU(scope);
+    await clearSummaryVectorFlushTasksByScope_ACU(scope);
 }
 
 export function isInvalidExternalVectorFileError_ACU(message: string): boolean {

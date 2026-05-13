@@ -56,16 +56,60 @@ vi.mock('../../src/service/worldbook/pipeline', () => ({
   deleteAllGeneratedEntries_ACU: vi.fn().mockResolvedValue(undefined),
 }));
 
-// 让 mergeAllIndependentTables_ACU 真实地从 chat 数组中读取数据
+function cloneJson_ACU<T>(value: T): T {
+  return value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+
+function applyTestDelta_ACU(base: any | null, delta: any): any | null {
+  const next = base ? cloneJson_ACU(base) : { mate: { type: 'chatSheets', version: 1 } };
+  for (const [sheetKey, sheetDelta] of Object.entries(delta?.changesBySheet || {}) as [string, any][]) {
+    const existing = next[sheetKey]
+      ? cloneJson_ACU(next[sheetKey])
+      : {
+          name: sheetDelta.sheetName || sheetKey,
+          content: [sheetDelta.header || ['row_id']],
+        };
+    if (sheetDelta.sheetMeta) Object.assign(existing, cloneJson_ACU(sheetDelta.sheetMeta));
+    if (sheetDelta.sheetName) existing.name = sheetDelta.sheetName;
+    if (sheetDelta.header) existing.content[0] = cloneJson_ACU(sheetDelta.header);
+    if (!Array.isArray(existing.content)) existing.content = [sheetDelta.header || ['row_id']];
+
+    let rows = existing.content.slice(1).map((row: any[]) => cloneJson_ACU(row));
+    for (const change of sheetDelta.rowChanges || []) {
+      if (change.op === 'clearSheet') {
+        rows = [];
+      } else if (change.op === 'delete') {
+        rows = rows.filter((row: any[]) => row[0] !== change.rowId);
+      } else if (change.op === 'upsert') {
+        rows = rows.filter((row: any[]) => row[0] !== change.rowId);
+        const index = Number.isFinite(change.rowIndexHint) ? Math.max(0, Math.min(Number(change.rowIndexHint) - 1, rows.length)) : rows.length;
+        rows.splice(index, 0, cloneJson_ACU(change.row));
+      }
+    }
+    existing.content = [existing.content[0], ...rows];
+    next[sheetKey] = existing;
+  }
+  return next;
+}
+
+// 让 mergeAllIndependentTables_ACU 从测试 chat 数组中读取 V2 layer，兼容少量 legacy fixture。
 vi.mock('../../src/service/runtime/helpers-remaining', () => ({
   mergeAllIndependentTables_ACU: vi.fn(async () => {
-    // 模拟从 chat 中合并：找最后一条 AI 消息的 IsolatedData
+    let reconstructed: any | null = null;
+    for (const msg of mockChat) {
+      if (!msg || msg.is_user) continue;
+      const layer = msg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+      if (layer?.checkpoint) reconstructed = cloneJson_ACU(layer.checkpoint.data);
+      if (layer?.delta) reconstructed = applyTestDelta_ACU(reconstructed, layer.delta);
+    }
+    if (reconstructed) return reconstructed;
+
     for (let i = mockChat.length - 1; i >= 0; i--) {
       const msg = mockChat[i];
       if (msg.is_user) continue;
       const isolated = msg.TavernDB_ACU_IsolatedData;
       if (isolated && isolated[''] && isolated[''].independentData) {
-        return JSON.parse(JSON.stringify(isolated[''].independentData));
+        return cloneJson_ACU(isolated[''].independentData);
       }
     }
     return null;
@@ -112,10 +156,10 @@ describe('I1: 表格数据完整生命周期', () => {
     expect(saveResult.saved).toBe(true);
     expect(saveResult.messageIndex).toBe(0);
 
-    // 5. 验证 chat 消息上写入了数据
+    // 5. 验证 chat 消息上写入了 V2 delta 数据
     const aiMsg = mockChat[0];
     expect(aiMsg.TavernDB_ACU_IsolatedData).toBeDefined();
-    expect(aiMsg.TavernDB_ACU_IsolatedData[''].independentData.sheet_0).toBeDefined();
+    expect(aiMsg.TavernDB_ACU_IsolatedData[''].tablePersistenceV2?.delta?.changedSheets).toContain('sheet_0');
 
     // 6. 重新加载
     mockCurrentJsonTableDataRef.value = null;
@@ -142,14 +186,16 @@ describe('I1: 表格数据完整生命周期', () => {
     // 第二次保存
     await saveIndependentTableToChatHistory_ACU();
 
-    // 验证最终数据
+    // 验证最终数据来自 V2 delta 重建，而不是 legacy 快照
     const aiMsg = mockChat[0];
-    const savedData = aiMsg.TavernDB_ACU_IsolatedData[''].independentData.sheet_0;
-    expect(savedData.content).toHaveLength(3); // header + 2 rows
-    expect(savedData.content[2]).toEqual(['2', '药水']);
+    expect(aiMsg.TavernDB_ACU_IsolatedData[''].tablePersistenceV2?.delta?.changedSheets).toContain('sheet_0');
+    const savedData = await (await import('../../src/service/runtime/helpers-remaining')).mergeAllIndependentTables_ACU();
+    expect(savedData).not.toBeNull();
+    expect(savedData!.sheet_0.content).toHaveLength(3); // header + 2 rows
+    expect(savedData!.sheet_0.content[2]).toEqual(['2', '药水']);
   });
 
-  it('保存时写入 legacy 兼容字段', async () => {
+  it('保存时写入 V2 delta 且不写 legacy 兼容字段', async () => {
     mockChat.push({ is_user: false, mes: 'AI回复' });
     mockCurrentJsonTableDataRef.value = {
       sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
@@ -158,10 +204,11 @@ describe('I1: 表格数据完整生命周期', () => {
     await saveIndependentTableToChatHistory_ACU();
 
     const aiMsg = mockChat[0];
-    // 验证 legacy 字段
-    expect(aiMsg.TavernDB_ACU_IndependentData).toBeDefined();
-    expect(aiMsg.TavernDB_ACU_ModifiedKeys).toBeDefined();
-    expect(aiMsg.TavernDB_ACU_UpdateGroupKeys).toBeDefined();
+    // 验证 V2 字段，并确保正常保存不再写 legacy 快照
+    expect(aiMsg.TavernDB_ACU_IsolatedData[''].tablePersistenceV2?.delta).toBeDefined();
+    expect(aiMsg.TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(aiMsg.TavernDB_ACU_ModifiedKeys).toBeUndefined();
+    expect(aiMsg.TavernDB_ACU_UpdateGroupKeys).toBeUndefined();
   });
 
   it('隔离模式下数据按标签隔离', async () => {
@@ -178,9 +225,9 @@ describe('I1: 表格数据完整生命周期', () => {
     await saveIndependentTableToChatHistory_ACU();
 
     const aiMsg = mockChat[0];
-    // 验证数据写入了 tag_A 标签下
+    // 验证 V2 数据写入了 tag_A 标签下
     expect(aiMsg.TavernDB_ACU_IsolatedData['tag_A']).toBeDefined();
-    expect(aiMsg.TavernDB_ACU_IsolatedData['tag_A'].independentData.sheet_0).toBeDefined();
+    expect(aiMsg.TavernDB_ACU_IsolatedData['tag_A'].tablePersistenceV2?.delta?.changedSheets).toContain('sheet_0');
     expect(aiMsg.TavernDB_ACU_Identity).toBe('tag_A');
   });
 });

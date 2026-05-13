@@ -271,6 +271,9 @@ export async function finalizeAutoMerge_ACU(
 
     if (!summaryKey || accumulatedSummary.length === 0) return { mergedRows: 0 };
 
+    const beforeDataForSave = currentJsonTableData_ACU
+        ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+        : null;
     const table = currentJsonTableData_ACU[summaryKey];
     const originalContent = table.content.slice(1);
 
@@ -308,7 +311,14 @@ export async function finalizeAutoMerge_ACU(
     });
 
     const keysToSave = [summaryKey];
-    await saveIndependentTableToChatHistory_ACU(getLastMessageIndex_ACU(), keysToSave, keysToSave);
+    await saveIndependentTableToChatHistory_ACU({
+        targetMessageIndex: getLastMessageIndex_ACU(),
+        targetSheetKeys: keysToSave,
+        updateGroupKeys: keysToSave,
+        beforeData: beforeDataForSave,
+        afterData: currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null,
+        trackAsUpdate: true,
+    });
     await updateReadableLorebookEntry_ACU(true);
 
     return { mergedRows: accumulatedSummary.length };

@@ -95,6 +95,31 @@ describe('NativeTableServiceAdapter', () => {
       expect(mockSaveIndependentTable).toHaveBeenCalledWith(-1, ['sheet_0'], ['group_1']);
     });
 
+    it('options 参数完整转发到保存入口', async () => {
+      mockSaveIndependentTable.mockResolvedValue({ saved: true, messageIndex: 7 });
+      const beforeData: any = { mate: { type: 'acu' }, sheet_0: { content: [['row_id'], ['1']] } };
+      const afterData: any = { mate: { type: 'acu' }, sheet_0: { content: [['row_id'], ['2']] } };
+
+      const result = await adapter.saveToChat({
+        targetMessageIndex: 3,
+        targetSheetKeys: ['sheet_0'],
+        updateGroupKeys: ['sheet_0'],
+        trackingSheetKeys: ['sheet_0'],
+        beforeData,
+        afterData,
+      });
+
+      expect(result.messageIndex).toBe(7);
+      expect(mockSaveIndependentTable).toHaveBeenCalledWith({
+        targetMessageIndex: 3,
+        targetSheetKeys: ['sheet_0'],
+        updateGroupKeys: ['sheet_0'],
+        trackingSheetKeys: ['sheet_0'],
+        beforeData,
+        afterData,
+      });
+    });
+
     it('null 参数正确传递', async () => {
       mockSaveIndependentTable.mockResolvedValue({ saved: true });
       await adapter.saveToChat(null, null);

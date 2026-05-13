@@ -68,8 +68,13 @@ export function ensureVisualizerTemplateAssistantAddonDom_ACU(): boolean {
     }
 
     const dock = root.querySelector(ASSISTANT_DOCK_SELECTOR_ACU);
-    if (!root.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && !doc.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && dock) {
-        dock.appendChild(createAssistantHost_ACU(doc));
+    if (!root.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && !doc.querySelector(`#${ASSISTANT_HOST_ID_ACU}`)) {
+        const host = createAssistantHost_ACU(doc);
+        if (dock) {
+            dock.appendChild(host);
+        } else {
+            root.appendChild(host);
+        }
         domChanged = true;
     }
 

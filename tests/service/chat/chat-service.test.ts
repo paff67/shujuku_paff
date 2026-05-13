@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockDeleteSummaryVectorIndexExternal } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -19,9 +19,11 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockSetChatMessages: vi.fn(),
   mockEmitMessageUpdated: vi.fn(),
   mockGetCurrentIsolationKey: vi.fn(() => ''),
-  mockGetLastOptimizationBase: vi.fn(() => null),
+  mockGetLastOptimizationBase: vi.fn((): any => null),
   mockSetLastOptimizationBase: vi.fn(),
   mockSanitizeSheet: vi.fn((sheet: any) => sheet),
+  mockPersistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true }),
+  mockDeleteSummaryVectorIndexExternal: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -47,6 +49,18 @@ vi.mock('../../../src/service/optimization/content-optimization', () => ({
   setLastOptimizationBase_ACU: mockSetLastOptimizationBase,
 }));
 
+vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
+  deleteSummaryVectorIndexExternal_ACU: (...args: any[]) => mockDeleteSummaryVectorIndexExternal(...args),
+}));
+
+vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
+  assignSummaryVectorIndexStateToTagData_ACU: vi.fn(),
+}));
+
+vi.mock('../../../src/service/table/table-service', () => ({
+  persistTablesToChatMessage_ACU: (...args: any[]) => mockPersistTablesToChatMessage(...args),
+}));
+
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
   currentJsonTableData_ACU: mockCurrentJsonTableData,
@@ -64,6 +78,7 @@ import {
   deleteLocalDataInChatCore_ACU,
   overrideLatestLayerWithTemplateCore_ACU,
   saveCurrentDataForTable_ACU,
+  clearTableDataAtFloors_ACU,
 } from '../../../src/service/chat/chat-service';
 
 beforeEach(() => {
@@ -158,20 +173,66 @@ describe('getOriginalContent_ACU', () => {
 
 // ═══ purgeOldLayerData_ACU ═══
 describe('purgeOldLayerData_ACU', () => {
-  it('清理超出保留层数的旧数据', async () => {
-    mockSettings.retainRecentLayers = 2;
-    const chat = [
-      { is_user: false }, // index 0: 保护
-      { is_user: false, TavernDB_ACU_Data: { sheet_0: {} } }, // index 1: 清理
-      { is_user: true },
-      { is_user: false, TavernDB_ACU_Data: { sheet_0: {} } }, // index 3: 保留
-      { is_user: false, TavernDB_ACU_Data: { sheet_0: {} } }, // index 4: 保留
+  function makeV2Layer(rows: string[][]) {
+    return {
+      version: 2,
+      checkpoint: {
+        kind: 'checkpoint',
+        version: 2,
+        checkpointId: 'checkpoint-test',
+        createdAt: '2026-05-08T00:00:00.000Z',
+        source: 'template-seed',
+        isolationKey: '',
+        data: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_0: { name: '物品表', content: [['row_id', '物品名'], ...rows] },
+        },
+      },
+    };
+  }
+
+  it('清理超出保留层数的旧表格数据前写入 boundary checkpoint，并只清理剧情字段', async () => {
+    mockSettings.retainRecentLayers = 1;
+    const chat: any[] = [
+      { is_user: false },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { tablePersistenceV2: makeV2Layer([['1', '剑']]) } }, qrf_plot: { step: 1 } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { tablePersistenceV2: makeV2Layer([['2', '盾']]) } }, qrf_plot_tasks: ['old'] },
     ];
     mockGetChatArray.mockReturnValue(chat);
+
     await purgeOldLayerData_ACU();
-    expect(chat[1].TavernDB_ACU_Data).toBeUndefined();
-    expect(chat[3].TavernDB_ACU_Data).toBeDefined();
+
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(chat[1].qrf_plot).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('retention-rollup');
+    expect(chat[2].qrf_plot_tasks).toEqual(['old']);
     expect(mockSaveChatToHost).toHaveBeenCalled();
+  });
+
+  it('retention 清理表格层时不删除 summary vector manifest 外置引用', async () => {
+    mockSettings.retainRecentLayers = 1;
+    const manifest = { file: 'summary-index.json' };
+    const chat: any[] = [
+      { is_user: false },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            tablePersistenceV2: makeV2Layer([['1', '剑']]),
+            summaryVectorIndexManifest: manifest,
+            summaryVectorIndexState: { manifest },
+          },
+        },
+      },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { tablePersistenceV2: makeV2Layer([['2', '盾']]) } } },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    await purgeOldLayerData_ACU();
+
+    expect(chat[1].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest).toEqual(manifest);
+    expect(chat[1].TavernDB_ACU_IsolatedData[''].summaryVectorIndexState).toEqual({ manifest });
+    expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
   });
 
   it('retainRecentLayers=0 时跳过', async () => {
@@ -269,7 +330,7 @@ describe('overrideLatestLayerWithTemplateCore_ACU', () => {
   });
 
   it('覆盖后只保留表头', async () => {
-    const chat = [{ is_user: false }];
+    const chat: any[] = [{ is_user: false }];
     mockGetChatArray.mockReturnValue(chat);
     const templateData = {
       sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑'], ['2', '盾']] },
@@ -290,21 +351,164 @@ describe('saveCurrentDataForTable_ACU', () => {
     mockGetChatArray.mockReturnValue([]);
     await expect(saveCurrentDataForTable_ACU('sheet_0')).resolves.not.toThrow();
   });
-  it('标准表保存到 TavernDB_ACU_Data', async () => {
-    const chat = [{ is_user: false, mes: 'AI回复' }];
+  it('标准表通过 V2 保存入口持久化到目标 AI 楼层', async () => {
+    const chat: any[] = [{ is_user: false, mes: 'AI回复' }];
     mockGetChatArray.mockReturnValue(chat);
     mockCurrentJsonTableData.sheet_0 = { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] };
+
     await saveCurrentDataForTable_ACU('sheet_0');
-    expect(chat[0].TavernDB_ACU_Data).not.toBeUndefined();
-    expect(chat[0].TavernDB_ACU_Data.sheet_0).toEqual({ name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] });
-    expect(mockSaveChatToHost).toHaveBeenCalled();
+
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_0'],
+      updateGroupKeys: null,
+      trackAsUpdate: true,
+    }));
+    expect(chat[0].TavernDB_ACU_Data).toBeUndefined();
   });
-  it('纪要表保存到 TavernDB_ACU_SummaryData', async () => {
-    const chat = [{ is_user: false, mes: 'AI回复' }];
+  it('纪要表通过 V2 保存入口持久化，不再直接写 legacy SummaryData', async () => {
+    const chat: any[] = [{ is_user: false, mes: 'AI回复' }];
     mockGetChatArray.mockReturnValue(chat);
     mockCurrentJsonTableData.sheet_1 = { name: '纪要表', content: [['row_id', '事件'], ['1', '开始']] };
+
     await saveCurrentDataForTable_ACU('sheet_1');
-    expect(chat[0].TavernDB_ACU_SummaryData).not.toBeUndefined();
-    expect(chat[0].TavernDB_ACU_SummaryData.sheet_1).toEqual({ name: '纪要表', content: [['row_id', '事件'], ['1', '开始']] });
+
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_1'],
+      updateGroupKeys: null,
+      trackAsUpdate: true,
+    }));
+    expect(chat[0].TavernDB_ACU_SummaryData).toBeUndefined();
+  });
+});
+
+// ═══ clearTableDataAtFloors_ACU ═══
+describe('clearTableDataAtFloors_ACU', () => {
+  function makeV2Message(): any {
+    return {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          independentData: {
+            sheet_0: { name: '物品表', content: [['row_id'], ['legacy-0']] },
+            sheet_1: { name: '纪要表', content: [['row_id'], ['legacy-1']] },
+          },
+          modifiedKeys: ['sheet_0', 'sheet_1'],
+          updateGroupKeys: ['sheet_0', 'sheet_1'],
+          tablePersistenceV2: {
+            version: 2,
+            checkpoint: {
+              kind: 'checkpoint',
+              version: 2,
+              checkpointId: 'checkpoint-1',
+              createdAt: '2026-05-08T00:00:00.000Z',
+              source: 'legacy-migration',
+              isolationKey: '',
+              data: {
+                mate: { type: 'chatSheets' },
+                sheet_0: { name: '物品表', content: [['row_id'], ['base-0']] },
+                sheet_1: { name: '纪要表', content: [['row_id'], ['base-1']] },
+              },
+            },
+            delta: {
+              kind: 'delta',
+              version: 2,
+              deltaId: 'delta-1',
+              createdAt: '2026-05-08T00:00:01.000Z',
+              isolationKey: '',
+              changedSheets: ['sheet_0', 'sheet_1'],
+              modifiedKeys: ['sheet_0', 'sheet_1'],
+              updateGroupKeys: ['sheet_0', 'sheet_1'],
+              changesBySheet: {
+                sheet_0: { sheetKey: 'sheet_0', rowChanges: [{ op: 'upsert', rowId: '2', row: ['2'] }] },
+                sheet_1: { sheetKey: 'sheet_1', rowChanges: [{ op: 'upsert', rowId: '3', row: ['3'] }] },
+              },
+            },
+          },
+        },
+      },
+      TavernDB_ACU_Data: {
+        sheet_0: { name: '物品表', content: [['row_id'], ['legacy-root-0']] },
+      },
+      TavernDB_ACU_SummaryData: {
+        sheet_1: { name: '纪要表', content: [['row_id'], ['legacy-root-1']] },
+      },
+      TavernDB_ACU_ModifiedKeys: ['sheet_0', 'sheet_1'],
+      TavernDB_ACU_UpdateGroupKeys: ['sheet_0', 'sheet_1'],
+    };
+  }
+
+  it('指定目标表时只删除目标 sheet 的 V2 delta contribution，并保留 checkpoint 与其他 sheet delta', async () => {
+    const msg = makeV2Message();
+    mockGetChatArray.mockReturnValue([msg]);
+
+    const count = await clearTableDataAtFloors_ACU([0], ['sheet_0']);
+
+    const tagData = msg.TavernDB_ACU_IsolatedData[''];
+    expect(count).toBe(1);
+    expect(tagData.tablePersistenceV2.checkpoint).toBeDefined();
+    expect(tagData.tablePersistenceV2.delta.changesBySheet.sheet_0).toBeUndefined();
+    expect(tagData.tablePersistenceV2.delta.changesBySheet.sheet_1).toBeDefined();
+    expect(tagData.tablePersistenceV2.delta.changedSheets).toEqual(['sheet_1']);
+    expect(tagData.tablePersistenceV2.delta.modifiedKeys).toEqual(['sheet_1']);
+    expect(tagData.tablePersistenceV2.delta.updateGroupKeys).toEqual(['sheet_1']);
+    expect(tagData.independentData.sheet_0).toBeUndefined();
+    expect(tagData.independentData.sheet_1).toBeDefined();
+    expect(mockSaveChatToHost).toHaveBeenCalled();
+  });
+
+  it('目标表清理后 delta 为空时删除 delta 但保留 checkpoint', async () => {
+    const msg = makeV2Message();
+    const tagData = msg.TavernDB_ACU_IsolatedData[''];
+    delete tagData.tablePersistenceV2.delta.changesBySheet.sheet_1;
+    tagData.tablePersistenceV2.delta.changedSheets = ['sheet_0'];
+    tagData.tablePersistenceV2.delta.modifiedKeys = ['sheet_0'];
+    tagData.tablePersistenceV2.delta.updateGroupKeys = ['sheet_0'];
+    mockGetChatArray.mockReturnValue([msg]);
+
+    const count = await clearTableDataAtFloors_ACU([0], ['sheet_0']);
+
+    expect(count).toBe(1);
+    expect(tagData.tablePersistenceV2.checkpoint).toBeDefined();
+    expect(tagData.tablePersistenceV2.delta).toBeUndefined();
+    expect(mockSaveChatToHost).toHaveBeenCalled();
+  });
+
+  it('未指定目标表时只删除当前楼层 delta，不删除 checkpoint', async () => {
+    const msg = makeV2Message();
+    mockGetChatArray.mockReturnValue([msg]);
+
+    const count = await clearTableDataAtFloors_ACU([0], null);
+
+    const tagData = msg.TavernDB_ACU_IsolatedData[''];
+    expect(count).toBe(1);
+    expect(tagData.tablePersistenceV2.checkpoint).toBeDefined();
+    expect(tagData.tablePersistenceV2.delta).toBeUndefined();
+    expect(tagData.independentData).toEqual({});
+    expect(tagData.modifiedKeys).toEqual([]);
+    expect(tagData.updateGroupKeys).toEqual([]);
+    expect(mockSaveChatToHost).toHaveBeenCalled();
+  });
+
+  it('只有 tracking keys 被清理时也会保存聊天', async () => {
+    const msg: any = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          independentData: {},
+          modifiedKeys: ['sheet_0'],
+          updateGroupKeys: ['sheet_0'],
+        },
+      },
+    };
+    mockGetChatArray.mockReturnValue([msg]);
+
+    const count = await clearTableDataAtFloors_ACU([0], ['sheet_0']);
+
+    expect(count).toBe(1);
+    expect(msg.TavernDB_ACU_IsolatedData[''].modifiedKeys).toEqual([]);
+    expect(msg.TavernDB_ACU_IsolatedData[''].updateGroupKeys).toEqual([]);
+    expect(mockSaveChatToHost).toHaveBeenCalled();
   });
 });

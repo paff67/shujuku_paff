@@ -508,7 +508,7 @@ describe('visualizer template assistant panel', () => {
     expect(panel.style.inset).toBe('0');
     expect(panel.style.width).toBe('100vw');
     expect(panel.style.height).toBe('100dvh');
-    expect(panel.style.background).toContain('var(--vis-assistant-window-bg, var(--vis-bg-color))');
+    expect(panel.style.background).toContain('var(--vis-assistant-window-bg, var(--vis-bg-color, #111827))');
   });
 
   it('窄屏模式下 assistant 面板切换为全屏 overlay 且按钮纵向堆叠', () => {
@@ -1012,7 +1012,7 @@ describe('visualizer template assistant panel', () => {
       expect(html).toContain('acu-chat-scroll-frame');
       expect(html).toContain('border-radius:12px');
       expect(html).toContain('overflow:hidden');
-      expect(html).toContain('background:var(--vis-assistant-surface-bg, var(--vis-bg-light))');
+      expect(html).toContain('background:var(--vis-assistant-surface-bg, var(--vis-bg-light, rgba(255,255,255,0.08)))');
       const chatContainer = document.querySelector('.acu-chat-container');
       expect(chatContainer).toBeTruthy();
       expect(html).toContain('overflow-y:auto');

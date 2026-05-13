@@ -265,7 +265,11 @@ beforeEach(() => {
 
   mockEnsurePlotTasksCompat.mockImplementation(() => undefined);
   mockGetPlotPromptContentById.mockReturnValue('');
-  mockNormalizePlotTasks.mockImplementation((plotSettings: any) => Array.isArray(plotSettings?.tasks) ? plotSettings.tasks : []);
+  mockNormalizePlotTasks.mockImplementation((plotSettings: any) => {
+    if (Array.isArray(plotSettings?.tasks)) return plotSettings.tasks;
+    if (Array.isArray(plotSettings?.plotTasks)) return plotSettings.plotTasks;
+    return [];
+  });
   mockNormalizePlotTask.mockImplementation((task: any) => ({
     enabled: true,
     stage: 1,
@@ -631,9 +635,9 @@ describe('runPlotTasksRuntime_ACU', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // stage 级统一 effective preset
+  // task 级 effective preset
   // ═══════════════════════════════════════════════════════════════
-  it('同 stage 多任务时，统一使用第一个有显式 taskApiPreset 的任务的预设', async () => {
+  it('同 stage 多任务时，显式 taskApiPreset 只作用于对应任务', async () => {
     mockCallApiWithPlotPreset.mockResolvedValue('AI回复内容');
     mockExtractPlotTagsFromResponse.mockReturnValue({
       tagNames: ['tag1'],
@@ -660,13 +664,12 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    // 两个任务应使用相同的 effective preset
     const allCalls = mockCallApiWithPlotPreset.mock.calls;
     expect(allCalls.length).toBeGreaterThanOrEqual(2);
-    // 第一个任务的 effectivePreset 应为 'preset-A'
+    // 第一个任务的 effectivePreset 应为显式 taskApiPreset。
     expect(allCalls[0][1]).toBe('preset-A');
-    // 第二个任务也应使用 stage 级统一后的 'preset-A'
-    expect(allCalls[1][1]).toBe('preset-A');
+    // 第二个任务没有显式 taskApiPreset，应按任务级规则回退到全局 plotApiPreset（本用例为空）。
+    expect(allCalls[1][1]).toBe('');
   });
 
   it('同 stage 无任务有显式 taskApiPreset 时，统一回退到全局 plotApiPreset', async () => {

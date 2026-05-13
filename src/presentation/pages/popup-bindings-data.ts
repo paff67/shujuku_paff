@@ -32,16 +32,18 @@ import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-d
 import { populateImportWorldbookTargetSelector_ACU } from '../components/worldbook-selector';
 import { saveApiConfig_ACU, clearApiConfig_ACU, fetchModelsAndConnect_ACU, loadApiPreset_ACU, saveApiPreset_ACU, deleteApiPreset_ACU, saveCustomCharCardPrompt_ACU, saveImportSplitSize_ACU, resetDefaultCharCardPrompt_ACU, updateCustomApiInputsState_ACU, refreshApiPresetSelectors_ACU } from '../triggers/settings-ui-sync';
 import { handleImportSelectAll_ACU, handleImportSelectNone_ACU } from '../components/table-selector';
-import { getAggregatedSummaryVectorIndexSnapshot_ACU, getLatestSummaryVectorIndexSnapshotState_ACU, assignSummaryVectorIndexStateToTagData_ACU } from '../../service/vector/summary-vector-index-state-service';
+import { getLatestSummaryVectorIndexSnapshotState_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { archiveSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-archive-service';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
-import { cleanupUnreachableSummaryVectorIndexFiles_ACU, getSummaryVectorIndexStats_ACU, inspectSummaryVectorIndexHealth_ACU } from '../../service/vector/summary-vector-index-storage-service';
-import { clearVectorIndexTempCache_ACU } from '../../data/storage/vector-index-temp-cache';
-import { clearSummaryVectorFlushTasksByScope_ACU, clearSummaryVectorHotCache_ACU, deleteSummaryVectorHotCacheByScope_ACU } from '../../data/storage/vector-index-hot-cache';
-import { getChatArray_ACU, getLastMessageIndex_ACU, saveChatToHost_ACU } from '../../service/chat/chat-service';
-import { readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
-import { buildVectorIndexSingleSnapshotFilePath_ACU, buildLegacyVectorIndexSingleSnapshotFilePath_ACU, readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
+import { getSummaryVectorIndexStats_ACU, inspectSummaryVectorIndexHealth_ACU } from '../../service/vector/summary-vector-index-storage-service';
+import { clearAllSummaryVectorIndexCaches_ACU } from '../../service/vector/summary-vector-index-cache-service';
+import { deleteCurrentSummaryVectorIndexFromChat_ACU, recoverSummaryVectorIndexFromExternalSnapshotForCurrentChat_ACU } from '../../service/vector/summary-vector-index-chat-service';
+import { getLastMessageIndex_ACU } from '../../service/chat/chat-service';
+
+function cloneCurrentTableDataForPersist_ACU(): any | null {
+    return currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null;
+}
 
 function formatBytes_ACU(bytes: number): string {
     const value = Math.max(0, Number(bytes) || 0);
@@ -55,7 +57,7 @@ async function refreshVectorIndexStatsPanel_ACU(): Promise<void> {
     // ── 自动恢复：tag data 无 state 时，从外部单文件快照恢复 ──
     if (!snapshot?.summaryVectorIndexState?.manifest) {
         try {
-            const recovered = await tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU();
+            const recovered = await recoverSummaryVectorIndexFromExternalSnapshotForCurrentChat_ACU();
             if (recovered) {
                 snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
             }
@@ -93,156 +95,6 @@ async function refreshVectorIndexStatsPanel_ACU(): Promise<void> {
  * 恢复成功后会将 state 写回最新非用户消息的 tag data 并保存聊天。
  * 会尝试多种 sourceTableKey 以应对表键变化的情况。
  */
-async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU(): Promise<boolean> {
-    const chatKey = String(currentChatFileIdentifier_ACU || '').trim();
-    const isolationKey = String(getCurrentIsolationKey_ACU() || '').trim();
-    if (!chatKey || !isolationKey) return false;
-
-    // 收集候选 sourceTableKey：当前值 + 所有纪要/大纲表键 + 兜底 'summary'
-    const candidateTableKeys = new Set<string>();
-    const currentTableKey = getCurrentSummaryVectorIndexSourceTableKey_ACU();
-    candidateTableKeys.add(currentTableKey);
-    candidateTableKeys.add('summary');
-    const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object' ? currentJsonTableData_ACU : null;
-    if (tables) {
-        for (const key of Object.keys(tables)) {
-            const table = tables[key];
-            if (table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''))) {
-                candidateTableKeys.add(key);
-            }
-        }
-    }
-
-    // [spv3.6.8] 获取当前角色名用于恢复时尝试新格式路径
-    const chatName = getCurrentCharacterCardName_ACU();
-
-    for (const sourceTableKey of candidateTableKeys) {
-        try {
-            // [spv3.6.8] 三层回退：新格式（含角色名）→ spv3.6.7 格式（无角色名）→ 旧版格式（含 isolationKey + sourceTableKey）
-            const namedPath = buildVectorIndexSingleSnapshotFilePath_ACU({ chatKey, isolationKey, sourceTableKey, chatName });
-            const unnamedPath = buildVectorIndexSingleSnapshotFilePath_ACU({ chatKey, isolationKey, sourceTableKey });
-            let loaded = await readVectorIndexJsonFile_ACU<{
-                schema: string;
-                manifest: any;
-                rows: any[];
-                chunks: any[];
-            }>(namedPath);
-            // 回退1：spv3.6.7 格式（无角色名前缀）
-            if ((!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') && namedPath !== unnamedPath) {
-                loaded = await readVectorIndexJsonFile_ACU<{
-                    schema: string;
-                    manifest: any;
-                    rows: any[];
-                    chunks: any[];
-                }>(unnamedPath);
-            }
-            // 回退2：旧版格式（含 isolationKey + sourceTableKey）
-            if (!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') {
-                const legacyPath = buildLegacyVectorIndexSingleSnapshotFilePath_ACU({ chatKey, isolationKey, sourceTableKey });
-                if (legacyPath !== namedPath && legacyPath !== unnamedPath) {
-                    loaded = await readVectorIndexJsonFile_ACU<{
-                        schema: string;
-                        manifest: any;
-                        rows: any[];
-                        chunks: any[];
-                    }>(legacyPath);
-                }
-            }
-            if (!loaded.ok || !loaded.data || loaded.data.schema !== 'single_file_snapshot') continue;
-
-            const blob = loaded.data;
-            const manifest = blob.manifest;
-            if (!manifest?.indexId || manifest.status !== 'ready') continue;
-
-            const chat = getChatArray_ACU();
-            if (!Array.isArray(chat) || chat.length === 0) continue;
-
-            // 找到最新的非用户消息
-            let targetIndex = -1;
-            for (let i = chat.length - 1; i >= 0; i--) {
-                if (chat[i] && !chat[i].is_user) { targetIndex = i; break; }
-            }
-            if (targetIndex < 0) continue;
-
-            const message = chat[targetIndex];
-            const tagData = readIsolatedTagData_ACU(message, isolationKey) || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} } as any;
-            if (tagData.summaryVectorIndexState?.manifest?.indexId) return false; // 已有 state，不覆盖
-
-            const rows = Array.isArray(blob.rows) ? blob.rows : [];
-            const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-            const recoveredState: any = {
-                manifest,
-                rows,
-                chunks,
-                rowCount: rows.filter((r: any) => r.status !== 'removed').length,
-                chunkCount: chunks.length,
-                snapshotMessageId: String(manifest.snapshotMessageId || message.mesId || ''),
-                sourceTableKey: String(manifest.sourceTableKey || sourceTableKey),
-                sourceTableName: String(manifest.sourceTableName || sourceTableKey),
-                indexedAt: String(manifest.indexedAt || new Date().toISOString()),
-                skippedRowCount: 0,
-            };
-            assignSummaryVectorIndexStateToTagData_ACU(tagData, recoveredState);
-            writeIsolatedTagData_ACU(message, isolationKey, tagData);
-            await saveChatToHost_ACU();
-            console.log(`[ACU交火向量索引] 已从外部快照自动恢复 state 到消息 #${targetIndex}（indexId=${manifest.indexId}，${rows.length} 行，${chunks.length} 块，sourceTableKey=${sourceTableKey}）`);
-            return true;
-        } catch { /* 尝试下一个 sourceTableKey */ }
-    }
-    return false;
-}
-
-function getCurrentSummaryVectorIndexSourceTableKey_ACU(): string {
-    const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
-        ? currentJsonTableData_ACU
-        : null;
-    if (!tables) return 'summary';
-    return Object.keys(tables).find((key) => {
-        const table = tables[key];
-        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
-    }) || 'summary';
-}
-
-async function deleteCurrentVectorIndexFromChat_ACU(): Promise<boolean> {
-    const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
-    const chat = getChatArray_ACU();
-    const scopeHints = new Map<string, { chatKey?: string; isolationKey: string; sourceTableKey: string }>();
-    let changed = false;
-
-    if (snapshot?.layers?.length) {
-        for (const layer of snapshot.layers) {
-            const message = chat[layer.messageIndex];
-            if (!message || message.is_user) continue;
-            const tagData = readIsolatedTagData_ACU(message, layer.isolationKey);
-            if (!tagData) continue;
-            const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
-            if (manifest) {
-                const hint = {
-                    chatKey: manifest.chatKey || currentChatFileIdentifier_ACU,
-                    isolationKey: manifest.isolationKey || layer.isolationKey,
-                    sourceTableKey: manifest.sourceTableKey || getCurrentSummaryVectorIndexSourceTableKey_ACU(),
-                };
-                scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
-            }
-            assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-            writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
-            changed = true;
-        }
-    }
-
-    if (changed) {
-        await saveChatToHost_ACU();
-    }
-
-    const scopeHintList = Array.from(scopeHints.values());
-    for (const hint of scopeHintList) {
-        await deleteSummaryVectorHotCacheByScope_ACU(hint);
-        await clearSummaryVectorFlushTasksByScope_ACU(hint);
-    }
-    const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: scopeHintList });
-    return changed || gcResult.deletedPaths.length > 0 || gcResult.failedDeletes.length > 0;
-}
-
 /**
  * 绑定数据管理标签页的所有事件（数据隔离 + 外部导入 + 模板预设 + 数据管理按钮）
  */
@@ -340,8 +192,7 @@ export async function bindDataEvents_ACU(): Promise<void> {
       }
       if ($vectorIndexClearCacheButton_ACU.length) {
           $vectorIndexClearCacheButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
-              await clearVectorIndexTempCache_ACU();
-              await clearSummaryVectorHotCache_ACU();
+              await clearAllSummaryVectorIndexCaches_ACU();
               await refreshVectorIndexStatsPanel_ACU();
               showToastr_ACU('success', '交火模式临时缓存与热缓存已清空。');
           });
@@ -363,7 +214,15 @@ export async function bindDataEvents_ACU(): Promise<void> {
                       return name === '纪要表' || name === '总结表' || name === '总体大纲' || name.includes('纪要') || name.includes('总结');
                   });
                   if (summaryKey) {
-                      await saveIndependentTableToChatHistory_ACU(getLastMessageIndex_ACU(), [summaryKey], [summaryKey]);
+                      const tableDataSnapshot = cloneCurrentTableDataForPersist_ACU();
+                      await saveIndependentTableToChatHistory_ACU({
+                          targetMessageIndex: getLastMessageIndex_ACU(),
+                          targetSheetKeys: [summaryKey],
+                          updateGroupKeys: [summaryKey],
+                          beforeData: tableDataSnapshot,
+                          afterData: tableDataSnapshot,
+                          trackAsUpdate: true,
+                      });
                   }
                   const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
                   await refreshVectorIndexStatsPanel_ACU();
@@ -413,7 +272,7 @@ export async function bindDataEvents_ACU(): Promise<void> {
       if ($vectorIndexDeleteCurrentButton_ACU.length) {
           $vectorIndexDeleteCurrentButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
               if (!confirm('确定要删除当前交火模式外置向量索引吗？这会删除 /user/files 中的索引分片，并清除聊天记录中的 manifest。')) return;
-              const deleted = await deleteCurrentVectorIndexFromChat_ACU();
+              const deleted = await deleteCurrentSummaryVectorIndexFromChat_ACU();
               await refreshVectorIndexStatsPanel_ACU();
               showToastr_ACU(deleted ? 'success' : 'info', deleted ? '当前交火模式索引已删除。' : '当前聊天没有可删除的交火模式索引。');
           });

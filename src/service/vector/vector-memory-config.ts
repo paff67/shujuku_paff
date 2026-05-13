@@ -196,6 +196,20 @@ export function getCurrentVectorMemoryConfig_ACU(): VectorMemoryConfig_ACU {
     return globalMeta_ACU.vectorMemoryConfigGlobal as VectorMemoryConfig_ACU;
 }
 
+export function updateGlobalVectorMemoryConfigFields_ACU(patch: Record<string, any>): VectorMemoryConfig_ACU {
+    const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+    globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
+    settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+    Object.keys(patch || {}).forEach((field) => {
+        (globalMeta_ACU.vectorMemoryConfigGlobal as any)[field] = patch[field];
+    });
+    const normalized = normalizeVectorMemoryConfig_ACU(globalMeta_ACU.vectorMemoryConfigGlobal);
+    Object.assign(globalMeta_ACU.vectorMemoryConfigGlobal, normalized);
+    settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+    saveGlobalMeta_ACU();
+    return globalMeta_ACU.vectorMemoryConfigGlobal as VectorMemoryConfig_ACU;
+}
+
 export function getVectorMemoryNamespace_ACU(chatFileIdentifier?: string | null): string {
     const config = getCurrentVectorMemoryConfig_ACU();
     const chatKey = cleanChatName_ACU(chatFileIdentifier || currentChatFileIdentifier_ACU || 'default');

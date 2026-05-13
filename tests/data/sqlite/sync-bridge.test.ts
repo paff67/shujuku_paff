@@ -116,6 +116,70 @@ describe('SyncBridge', () => {
       expect(engine.getTableNames()).toContain('characters');
     });
 
+    it('重复加载同名表时应替换旧表而不是因 CREATE TABLE already exists 失败', () => {
+      bridge.loadFromTableData(makeTableData({ sheet_0: makeSheet() }));
+      expect(engine.query('SELECT item_name, quantity FROM inventory ORDER BY row_id;').values).toEqual([
+        ['铁剑', 3],
+        ['治疗药水', 5],
+      ]);
+
+      const replacementSheet = makeSheet({
+        content: [
+          ['row_id', '物品名称', '数量', '描述'],
+          ['1', '银剑', '1', '替换后的武器'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_0: replacementSheet }))).not.toThrow();
+      expect(engine.query('SELECT item_name, quantity, description FROM inventory ORDER BY row_id;').values).toEqual([
+        ['银剑', 1, '替换后的武器'],
+      ]);
+    });
+
+    it('同一次加载中多张 sheet 指向不同 SQL 表时均应正常加载并保留数据', () => {
+      const globalStateSheet = makeSheet({
+        uid: 'global_state',
+        name: '全局数据表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE global_state (
+  row_id INTEGER PRIMARY KEY,
+  current_location TEXT NOT NULL,
+  cur_time TEXT NOT NULL
+);`,
+        },
+        content: [
+          ['row_id', 'current_location', 'cur_time'],
+          ['1', '医科大学', '2026-05-09 11:00'],
+        ],
+      });
+
+      const protagonistSheet = makeSheet({
+        uid: 'protagonist_info',
+        name: '主角信息表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE protagonist_info (
+  row_id INTEGER PRIMARY KEY,
+  char_name TEXT NOT NULL,
+  occupation TEXT
+);`,
+        },
+        content: [
+          ['row_id', 'char_name', 'occupation'],
+          ['1', '助手', '医学生'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({
+        sheet_global: globalStateSheet,
+        sheet_protagonist: protagonistSheet,
+      }))).not.toThrow();
+
+      expect(engine.query('SELECT current_location FROM global_state;').values).toEqual([['医科大学']]);
+      expect(engine.query('SELECT char_name, occupation FROM protagonist_info;').values).toEqual([['助手', '医学生']]);
+    });
+
     it('null 或空对象不报错', () => {
       expect(() => bridge.loadFromTableData(null as any)).not.toThrow();
       expect(() => bridge.loadFromTableData({} as any)).not.toThrow();
@@ -155,6 +219,14 @@ describe('SyncBridge', () => {
   // exportToTableData
   // ═══════════════════════════════════════════════════════════════
   describe('exportToTableData', () => {
+    it('空数据库导出时返回 mate-only 数据且不创建用户表', () => {
+      const exported = bridge.exportToTableData(makeMate());
+
+      expect(exported).toEqual({ mate: makeMate() });
+      expect(engine.getTableNames()).toEqual([]);
+      expect(engine.getAllTableNames()).toEqual(['_acu_sheet_meta']);
+    });
+
     it('从 SQLite 导出为 TableDataObject', () => {
       const originalData = makeTableData({ sheet_0: makeSheet() });
       bridge.loadFromTableData(originalData);

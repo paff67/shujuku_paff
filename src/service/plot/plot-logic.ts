@@ -152,6 +152,7 @@ export function normalizePlotTask_ACU(task: Record<string, any> | null, { index 
       name: taskName,
       enabled: cloned.enabled !== false,
       promptGroup,
+      taskApiPreset: typeof cloned.taskApiPreset === 'string' ? cloned.taskApiPreset : (fallback?.taskApiPreset || ''),
       extractTags: typeof cloned.extractTags === 'string' ? cloned.extractTags : (fallback?.extractTags || ''),
       extractInjectTags: typeof cloned.extractInjectTags === 'string' ? cloned.extractInjectTags : (fallback?.extractInjectTags || ''),
       finalDirectiveTemplate: typeof cloned.finalDirectiveTemplate === 'string' ? cloned.finalDirectiveTemplate : (fallback?.finalDirectiveTemplate || ''),

@@ -4,7 +4,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
-import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
+import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU } from '../settings/settings-service';
 import {
@@ -18,12 +19,22 @@ import {
 } from '../template/chat-scope';
 import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-remaining';
-import { cloneIsolatedData_ACU, writeIsolatedTagData_ACU, writeMessageIdentity_ACU, writeLegacyCompatData_ACU, writeLegacyStandardAndSummary_ACU, readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, writeIsolatedTagData_ACU, writeMessageIdentity_ACU, readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
+import { createTableDeltaFromBeforeAfter_ACU } from './table-delta-diff';
+import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
+import { clearCurrentIsolationLegacyTableSnapshots_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
 
 export interface TableChatPersistOptions_ACU {
   targetMessageIndex?: number;
   targetSheetKeys?: string[] | null;
   updateGroupKeys?: string[] | null;
+  beforeData?: TableDataObject_ACU | null;
+  afterData?: TableDataObject_ACU | null;
+  /**
+   * 显式允许把已有真实数据行的目标表保存为空表/缺失表。
+   * 默认 false：自动填表路径不允许把运行时异常导出的空快照落盘成清空 delta。
+   */
+  allowClearingTargetSheets?: boolean;
   /**
    * 只把这些 sheet 记录为“本轮已更新”。
    * targetSheetKeys 决定保存哪些表；trackingSheetKeys 决定哪些表推进自动更新门禁。
@@ -31,6 +42,70 @@ export interface TableChatPersistOptions_ACU {
    */
   trackingSheetKeys?: string[] | null;
   trackAsUpdate?: boolean;
+}
+
+function cloneTableDataForPersistence_ACU(data: TableDataObject_ACU | null | undefined): TableDataObject_ACU | null {
+  return data ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : null;
+}
+
+function sheetHasRealRowsForPersistence_ACU(sheet: any): boolean {
+  return !!sheet && Array.isArray(sheet.content) && sheet.content.length > 1;
+}
+
+function sheetIsMissingOrEmptyForPersistence_ACU(sheet: any): boolean {
+  return !sheet || !Array.isArray(sheet.content) || sheet.content.length <= 1;
+}
+
+function resolveTargetSheetKeysForPersistence_ACU(
+  targetSheetKeys: string[] | null,
+  beforeData: TableDataObject_ACU | null,
+  afterData: TableDataObject_ACU | null,
+): string[] {
+  if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
+    return Array.from(new Set(targetSheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_'))));
+  }
+
+  const keys = new Set<string>();
+  [beforeData, afterData].forEach(data => {
+    if (!data || typeof data !== 'object') return;
+    Object.keys(data).forEach(key => {
+      if (key.startsWith('sheet_')) keys.add(key);
+    });
+  });
+  return Array.from(keys);
+}
+
+function protectAgainstAccidentalEmptyAfterData_ACU(options: {
+  beforeData: TableDataObject_ACU | null;
+  afterData: TableDataObject_ACU | null;
+  targetSheetKeys: string[] | null;
+  allowClearingTargetSheets: boolean;
+}): TableDataObject_ACU | null {
+  const { beforeData, afterData, targetSheetKeys, allowClearingTargetSheets } = options;
+  if (allowClearingTargetSheets) return afterData;
+  if (!beforeData || typeof beforeData !== 'object') return afterData;
+
+  const keysToCheck = resolveTargetSheetKeysForPersistence_ACU(targetSheetKeys, beforeData, afterData);
+  if (keysToCheck.length === 0) return afterData;
+
+  let protectedAfterData = afterData ? cloneTableDataForPersistence_ACU(afterData)! : cloneTableDataForPersistence_ACU(beforeData)!;
+  let protectedCount = 0;
+
+  for (const sheetKey of keysToCheck) {
+    const beforeSheet = (beforeData as any)[sheetKey];
+    const afterSheet = (protectedAfterData as any)[sheetKey];
+    if (!sheetHasRealRowsForPersistence_ACU(beforeSheet)) continue;
+    if (!sheetIsMissingOrEmptyForPersistence_ACU(afterSheet)) continue;
+
+    (protectedAfterData as any)[sheetKey] = JSON.parse(JSON.stringify(beforeSheet));
+    protectedCount++;
+  }
+
+  if (protectedCount > 0) {
+    logWarn_ACU(`[TablePersistence] 阻止 ${protectedCount} 张目标表的异常空快照落盘；如需合法清空，请显式传入 allowClearingTargetSheets。`);
+  }
+
+  return protectedAfterData;
 }
 
 export async function persistTablesToChatMessage_ACU(
@@ -42,6 +117,9 @@ export async function persistTablesToChatMessage_ACU(
     updateGroupKeys = null,
     trackingSheetKeys = targetSheetKeys,
     trackAsUpdate = true,
+    beforeData = undefined,
+    afterData = undefined,
+    allowClearingTargetSheets = false,
   } = options;
 
 /**
@@ -101,7 +179,7 @@ export async function persistTablesToChatMessage_ACU(
     logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
   }
 
-  let isolatedData = cloneIsolatedData_ACU(targetMessage);
+  const isolatedData = cloneIsolatedData_ACU(targetMessage);
 
   if (!isolatedData[currentIsolationKey]) {
     isolatedData[currentIsolationKey] = {
@@ -111,8 +189,8 @@ export async function persistTablesToChatMessage_ACU(
     };
   }
 
-  let currentTagData = isolatedData[currentIsolationKey];
-  let independentData = currentTagData.independentData || {};
+  const currentTagData = isolatedData[currentIsolationKey];
+  currentTagData.independentData = {};
 
   let keysToSave: string[] = targetSheetKeys as string[];
 
@@ -126,15 +204,6 @@ export async function persistTablesToChatMessage_ACU(
       : []
   );
   const actuallyModifiedKeys = keysToSave.filter(sheetKey => trackingKeySet.has(sheetKey));
-
-  keysToSave.forEach(sheetKey => {
-    const table = currentJsonTableData_ACU[sheetKey];
-    if (table) {
-      independentData[sheetKey] = sanitizeSheetForStorage_ACU(JSON.parse(JSON.stringify(table)));
-    }
-  });
-
-  currentTagData.independentData = independentData;
 
   if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
     const existingModifiedKeys = currentTagData.modifiedKeys || [];
@@ -150,32 +219,68 @@ export async function persistTablesToChatMessage_ACU(
     logDebug_ACU(`[Merge Update Failed] No tables were modified for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
   }
 
-  writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
-
-  writeMessageIdentity_ACU(targetMessage, {
+  const isolationConfig = {
     enabled: settings_ACU.dataIsolationEnabled,
     code: settings_ACU.dataIsolationCode,
+  };
+  const resolvedBeforeData = beforeData !== undefined
+    ? beforeData
+    : reconstructTablesFromChatDeltas_ACU(chat, {
+      isolationKey: currentIsolationKey,
+      isolationConfig,
+    }, {
+      targetMessageIndexExclusive: finalIndex,
+      saveChatAfterMigration: false,
+    }).data;
+  const resolvedAfterDataRaw = afterData !== undefined
+    ? afterData
+    : (JSON.parse(JSON.stringify(currentJsonTableData_ACU)) as TableDataObject_ACU);
+  const resolvedAfterData = protectAgainstAccidentalEmptyAfterData_ACU({
+    beforeData: resolvedBeforeData,
+    afterData: resolvedAfterDataRaw,
+    targetSheetKeys: Array.isArray(targetSheetKeys) ? targetSheetKeys : null,
+    allowClearingTargetSheets,
   });
 
-  writeLegacyCompatData_ACU(targetMessage, independentData, currentTagData.modifiedKeys, currentTagData.updateGroupKeys);
+  const baseCheckpoint = reconstructTablesFromChatDeltas_ACU(chat, {
+    isolationKey: currentIsolationKey,
+    isolationConfig,
+  }, {
+    targetMessageIndexExclusive: finalIndex + 1,
+    allowLegacyMigration: false,
+    saveChatAfterMigration: false,
+  }).checkpoint;
 
-  logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables.`);
-
-  const legacyStandardData: any = { mate: { type: 'chatSheets', version: 1 } };
-  const legacySummaryData: any = { mate: { type: 'chatSheets', version: 1 } };
-
-  keysToSave.forEach(sheetKey => {
-    const table = currentJsonTableData_ACU[sheetKey];
-    if (table) {
-      if (isSummaryOrOutlineTable_ACU(table.name)) {
-        legacySummaryData[sheetKey] = sanitizeSheetForStorage_ACU(JSON.parse(JSON.stringify(table)));
-      } else {
-        legacyStandardData[sheetKey] = sanitizeSheetForStorage_ACU(JSON.parse(JSON.stringify(table)));
-      }
-    }
+  const delta = createTableDeltaFromBeforeAfter_ACU({
+    before: resolvedBeforeData,
+    after: resolvedAfterData,
+    targetSheetKeys: keysToSave,
+    modifiedKeys: trackAsUpdate ? actuallyModifiedKeys : [],
+    updateGroupKeys: trackAsUpdate && actuallyModifiedKeys.length > 0 ? (updateGroupKeys || []) : [],
+    isolationKey: currentIsolationKey,
+    targetMessageIndex: finalIndex,
+    baseCheckpointId: baseCheckpoint?.checkpointId,
   });
 
-  writeLegacyStandardAndSummary_ACU(targetMessage, legacyStandardData, legacySummaryData);
+  if (delta) {
+    currentTagData.tablePersistenceV2 = {
+      version: 2,
+      delta,
+    };
+  } else {
+    delete currentTagData.tablePersistenceV2;
+  }
+
+  writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
+
+  if (delta) {
+    writeTablePersistenceLayerV2_ACU(targetMessage, currentIsolationKey, currentTagData.tablePersistenceV2!);
+  }
+
+  writeMessageIdentity_ACU(targetMessage, isolationConfig);
+  clearCurrentIsolationLegacyTableSnapshots_ACU(targetMessage, currentIsolationKey, isolationConfig);
+
+  logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables. Delta written: ${!!delta}.`);
 
   await saveChatToHost_ACU();
 
@@ -188,12 +293,33 @@ export async function persistTablesToChatMessage_ACU(
  * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
  */
 export async function saveIndependentTableToChatHistory_ACU(
-  targetMessageIndex = -1,
+  options: TableChatPersistOptions_ACU,
+): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
+export async function saveIndependentTableToChatHistory_ACU(
+  targetMessageIndex?: number,
+  targetSheetKeys?: string[] | null,
+  updateGroupKeys?: string[] | null,
+  _skipPostRefresh?: boolean,
+  trackingSheetKeys?: string[] | null,
+): Promise<{ saved: boolean; messageIndex?: number; error?: string }>;
+export async function saveIndependentTableToChatHistory_ACU(
+  targetMessageIndexOrOptions: number | TableChatPersistOptions_ACU = -1,
   targetSheetKeys: string[] | null = null,
   updateGroupKeys: string[] | null = null,
   _skipPostRefresh = false,
   trackingSheetKeys: string[] | null = targetSheetKeys,
 ): Promise<{ saved: boolean; messageIndex?: number; error?: string }> {
+  if (typeof targetMessageIndexOrOptions === 'object' && targetMessageIndexOrOptions !== null) {
+    return persistTablesToChatMessage_ACU({
+      trackAsUpdate: true,
+      ...targetMessageIndexOrOptions,
+    });
+  }
+
+  const targetMessageIndex = typeof targetMessageIndexOrOptions === 'number'
+    ? targetMessageIndexOrOptions
+    : -1;
+
   return persistTablesToChatMessage_ACU({
     targetMessageIndex,
     targetSheetKeys,

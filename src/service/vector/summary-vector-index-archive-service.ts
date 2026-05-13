@@ -85,6 +85,25 @@ interface SummaryVectorArchivePreparedRow_ACU {
 const summaryVectorIndexArchiveLocks_ACU = new Map<string, Promise<void>>();
 const summaryVectorIndexArchivePendingTasks_ACU = new Map<string, Promise<any>>();
 
+function cloneJson_ACU<T>(value: T): T {
+    if (value == null) return value;
+    try {
+        return JSON.parse(JSON.stringify(value)) as T;
+    } catch {
+        return value;
+    }
+}
+
+export function cloneIsolationTagDataForSummaryVectorWrite_ACU(existingTagData: any): any {
+    const cloned = cloneJson_ACU(existingTagData && typeof existingTagData === 'object' ? existingTagData : {} as any) || {};
+    return {
+        ...cloned,
+        independentData: cloned.independentData && typeof cloned.independentData === 'object' ? cloned.independentData : {},
+        modifiedKeys: Array.isArray(cloned.modifiedKeys) ? [...cloned.modifiedKeys] : [],
+        updateGroupKeys: Array.isArray(cloned.updateGroupKeys) ? [...cloned.updateGroupKeys] : [],
+    };
+}
+
 // ============================================================
 // 向量化→防抖归档 pipeline（参考 Engram 数据层 hook 触发模式）
 // 向量化阶段立即执行，归档阶段由向量数据变更触发防抖
@@ -754,13 +773,7 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         updateGroupKeys: [],
     };
     const nextIsolatedData = cloneIsolatedData_ACU(message);
-    const nextTagData = {
-        independentData: existingTagData.independentData || {},
-        modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-        updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-    } as any;
+    const nextTagData = cloneIsolationTagDataForSummaryVectorWrite_ACU(existingTagData);
     if (nextState) {
         const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
         const persisted = await persistSummaryVectorIndexSnapshot_ACU({
@@ -825,13 +838,7 @@ async function clearSummaryVectorIndexCheckpoint_ACU(params: {
     if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest) return !!manifest;
 
     const nextIsolatedData = cloneIsolatedData_ACU(message);
-    const nextTagData = {
-        independentData: existingTagData.independentData || {},
-        modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-        updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-    } as any;
+    const nextTagData = cloneIsolationTagDataForSummaryVectorWrite_ACU(existingTagData);
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
     nextIsolatedData[isolationKey] = nextTagData;
     message.TavernDB_ACU_IsolatedData = nextIsolatedData;

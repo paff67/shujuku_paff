@@ -22,9 +22,9 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } 
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { clearTableFieldsForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
 import { persistTablesToChatMessage_ACU } from '../table/table-service';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
+import { rollupCheckpointBeforePurge_ACU } from '../table/table-delta-retention';
 import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
 import { assignSummaryVectorIndexStateToTagData_ACU } from '../vector/summary-vector-index-state-service';
 
@@ -265,29 +265,28 @@ export async function purgeOldLayerData_ACU() {
 
     logDebug_ACU(`[数据清理] 将清理 ${indicesToPurge.length} 层消息的本地数据（保留最近 ${retainCount} 层）...`);
 
+    const retentionResult = rollupCheckpointBeforePurge_ACU({
+        chat,
+        isolationKey: getCurrentIsolationKey_ACU(),
+        isolationConfig: settings_ACU,
+        retainCount,
+        dataMessageIndices,
+    });
+
     let purgedCount = 0;
-    const keysToDelete = [
-        'TavernDB_ACU_Data',
-        'TavernDB_ACU_SummaryData',
-        'TavernDB_ACU_IndependentData',
-        'TavernDB_ACU_ModifiedKeys',
-        'TavernDB_ACU_UpdateGroupKeys',
-        'TavernDB_ACU_IsolatedData',
-        'TavernDB_ACU_Identity',
+    let changed = retentionResult.changed;
+    const plotKeysToDelete = [
         'qrf_plot',
         'qrf_plot_preset',
         'qrf_plot_tasks'
     ];
 
-    let purgedVectorManifestCount = 0;
     for (const idx of indicesToPurge) {
         const msg = chat[idx];
         if (!msg) continue;
 
-        purgedVectorManifestCount += await deleteVectorIndexManifestsFromMessage_ACU(msg);
-
         let modified = false;
-        for (const key of keysToDelete) {
+        for (const key of plotKeysToDelete) {
             if (Object.prototype.hasOwnProperty.call(msg, key)) {
                 delete msg[key];
                 modified = true;
@@ -296,13 +295,14 @@ export async function purgeOldLayerData_ACU() {
 
         if (modified) {
             purgedCount++;
+            changed = true;
         }
     }
 
-    if (purgedCount > 0) {
+    if (changed) {
         try {
             await saveChatToHost_ACU();
-            logDebug_ACU(`[数据清理] 已清理 ${purgedCount} 层消息的本地数据，已删除 ${purgedVectorManifestCount} 组交火向量索引外置文件引用，聊天记录已保存。`);
+            logDebug_ACU(`[数据清理] 已清理 ${retentionResult.purgedMessageIndices.length} 层表格数据与 ${purgedCount} 层剧情推进数据，boundary=${retentionResult.boundaryMessageIndex ?? 'none'}，聊天记录已保存。`);
         } catch (e) {
             logError_ACU('[数据清理] 保存聊天记录失败:', e);
         }
@@ -539,7 +539,7 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
 
         const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
             ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
-            : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
+            : purgeAllTableDeltaFromMessage_ACU(msg, isolationKey, isolationConfig);
         if (clearsSummaryOrOutline) {
             const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
             if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
@@ -560,6 +560,64 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
     return clearedCount;
 }
 
+function purgeAllTableDeltaFromMessage_ACU(msg: any, isolationKey: string, isolationConfig: { enabled: boolean; code: string }): boolean {
+    if (!msg || typeof msg !== 'object') return false;
+
+    let changed = false;
+    const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const layer = tagData?.tablePersistenceV2;
+    if (layer && typeof layer === 'object' && layer.delta) {
+        delete layer.delta;
+        if (!layer.checkpoint) {
+            delete tagData.tablePersistenceV2;
+        }
+        changed = true;
+    }
+
+    if (tagData && typeof tagData === 'object') {
+        if (tagData.independentData && Object.keys(tagData.independentData).length > 0) {
+            tagData.independentData = {};
+            changed = true;
+        }
+        if (Array.isArray(tagData.modifiedKeys) && tagData.modifiedKeys.length > 0) {
+            tagData.modifiedKeys = [];
+            changed = true;
+        }
+        if (Array.isArray(tagData.updateGroupKeys) && tagData.updateGroupKeys.length > 0) {
+            tagData.updateGroupKeys = [];
+            changed = true;
+        }
+    }
+
+    const legacyMatches = isolationConfig.enabled
+        ? msg?.TavernDB_ACU_Identity === isolationConfig.code
+        : !msg?.TavernDB_ACU_Identity;
+    if (legacyMatches) {
+        if (msg?.TavernDB_ACU_IndependentData) {
+            delete msg.TavernDB_ACU_IndependentData;
+            changed = true;
+        }
+        if (msg?.TavernDB_ACU_Data) {
+            delete msg.TavernDB_ACU_Data;
+            changed = true;
+        }
+        if (msg?.TavernDB_ACU_SummaryData) {
+            delete msg.TavernDB_ACU_SummaryData;
+            changed = true;
+        }
+        if (Array.isArray(msg?.TavernDB_ACU_ModifiedKeys) && msg.TavernDB_ACU_ModifiedKeys.length > 0) {
+            msg.TavernDB_ACU_ModifiedKeys = [];
+            changed = true;
+        }
+        if (Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys) && msg.TavernDB_ACU_UpdateGroupKeys.length > 0) {
+            msg.TavernDB_ACU_UpdateGroupKeys = [];
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]): boolean {
     if (!msg || !Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) return false;
 
@@ -567,6 +625,39 @@ function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]
     const isolationKey = getCurrentIsolationKey_ACU();
     const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
     if (tagData && typeof tagData === 'object') {
+        const layer = tagData.tablePersistenceV2;
+        const delta = layer?.delta;
+        if (delta && typeof delta === 'object') {
+            targetSheetKeys.forEach(sheetKey => {
+                if (delta.changesBySheet?.[sheetKey]) {
+                    delete delta.changesBySheet[sheetKey];
+                    changed = true;
+                }
+            });
+            if (Array.isArray(delta.changedSheets)) {
+                const nextChangedSheets = delta.changedSheets.filter((key: string) => !targetSheetKeys.includes(key));
+                if (nextChangedSheets.length !== delta.changedSheets.length) changed = true;
+                delta.changedSheets = nextChangedSheets;
+            }
+            if (Array.isArray(delta.modifiedKeys)) {
+                const nextModifiedKeys = delta.modifiedKeys.filter((key: string) => !targetSheetKeys.includes(key));
+                if (nextModifiedKeys.length !== delta.modifiedKeys.length) changed = true;
+                delta.modifiedKeys = nextModifiedKeys;
+            }
+            if (Array.isArray(delta.updateGroupKeys)) {
+                const nextUpdateGroupKeys = delta.updateGroupKeys.filter((key: string) => !targetSheetKeys.includes(key));
+                if (nextUpdateGroupKeys.length !== delta.updateGroupKeys.length) changed = true;
+                delta.updateGroupKeys = nextUpdateGroupKeys;
+            }
+            const hasRemainingDeltaSheets = delta.changesBySheet && Object.keys(delta.changesBySheet).length > 0;
+            if (!hasRemainingDeltaSheets && (!Array.isArray(delta.changedSheets) || delta.changedSheets.length === 0)) {
+                delete layer.delta;
+                if (!layer.checkpoint) {
+                    delete tagData.tablePersistenceV2;
+                }
+            }
+        }
+
         if (tagData.independentData && typeof tagData.independentData === 'object') {
             targetSheetKeys.forEach(sheetKey => {
                 if (tagData.independentData[sheetKey]) {
@@ -576,10 +667,14 @@ function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]
             });
         }
         if (Array.isArray(tagData.modifiedKeys)) {
-            tagData.modifiedKeys = tagData.modifiedKeys.filter((key: string) => !targetSheetKeys.includes(key));
+            const nextModifiedKeys = tagData.modifiedKeys.filter((key: string) => !targetSheetKeys.includes(key));
+            if (nextModifiedKeys.length !== tagData.modifiedKeys.length) changed = true;
+            tagData.modifiedKeys = nextModifiedKeys;
         }
         if (Array.isArray(tagData.updateGroupKeys)) {
-            tagData.updateGroupKeys = tagData.updateGroupKeys.filter((key: string) => !targetSheetKeys.includes(key));
+            const nextUpdateGroupKeys = tagData.updateGroupKeys.filter((key: string) => !targetSheetKeys.includes(key));
+            if (nextUpdateGroupKeys.length !== tagData.updateGroupKeys.length) changed = true;
+            tagData.updateGroupKeys = nextUpdateGroupKeys;
         }
     }
 
@@ -611,10 +706,14 @@ function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]
     }
 
     if (Array.isArray(msg?.TavernDB_ACU_ModifiedKeys)) {
-        msg.TavernDB_ACU_ModifiedKeys = msg.TavernDB_ACU_ModifiedKeys.filter((key: string) => !targetSheetKeys.includes(key));
+        const nextModifiedKeys = msg.TavernDB_ACU_ModifiedKeys.filter((key: string) => !targetSheetKeys.includes(key));
+        if (nextModifiedKeys.length !== msg.TavernDB_ACU_ModifiedKeys.length) changed = true;
+        msg.TavernDB_ACU_ModifiedKeys = nextModifiedKeys;
     }
     if (Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys)) {
-        msg.TavernDB_ACU_UpdateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys.filter((key: string) => !targetSheetKeys.includes(key));
+        const nextUpdateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys.filter((key: string) => !targetSheetKeys.includes(key));
+        if (nextUpdateGroupKeys.length !== msg.TavernDB_ACU_UpdateGroupKeys.length) changed = true;
+        msg.TavernDB_ACU_UpdateGroupKeys = nextUpdateGroupKeys;
     }
 
     return changed;
