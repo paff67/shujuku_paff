@@ -5,6 +5,10 @@ import { logWarn_ACU } from '../../shared/utils';
 import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
 import { readTablePersistenceLayerV2_ACU } from './table-delta-repository';
 import type { RollupCheckpointBeforePurgeResult_ACU, TableCheckpointV2_ACU, TablePersistenceLayerV2_ACU } from './table-delta-types';
+import {
+  getTablePersistenceDeltasV2_ACU,
+  hasTablePersistenceDeltasV2_ACU,
+} from '../../shared/models/table-persistence-v2-utils';
 
 function cloneJson_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -22,7 +26,7 @@ function hasAnySheetKey_ACU(value: unknown): boolean {
 function hasMeaningfulTagDataAfterTablePurge_ACU(tagData: any): boolean {
   if (!tagData || typeof tagData !== 'object') return false;
   if (hasAnySheetKey_ACU(tagData.independentData)) return true;
-  if (tagData.tablePersistenceV2?.checkpoint || tagData.tablePersistenceV2?.delta) return true;
+  if (tagData.tablePersistenceV2?.checkpoint || hasTablePersistenceDeltasV2_ACU(tagData.tablePersistenceV2)) return true;
   if (Array.isArray(tagData.modifiedKeys) && tagData.modifiedKeys.length > 0) return true;
   if (Array.isArray(tagData.updateGroupKeys) && tagData.updateGroupKeys.length > 0) return true;
   if (tagData.vectorMemoryState !== undefined) return true;
@@ -186,8 +190,10 @@ export function rollupCheckpointBeforePurge_ACU(
       version: 2,
       checkpoint,
     };
-    if (existingLayer?.delta) {
-      nextLayer.delta = cloneJson_ACU(existingLayer.delta);
+    const existingDeltas = getTablePersistenceDeltasV2_ACU(existingLayer);
+    if (existingDeltas.length > 0) {
+      nextLayer.deltas = existingDeltas.map(delta => cloneJson_ACU(delta));
+      nextLayer.delta = cloneJson_ACU(existingDeltas[existingDeltas.length - 1]);
     }
     const tagData = initIsolatedTagSlot_ACU(boundaryMessage, options.isolationKey);
     tagData.tablePersistenceV2 = nextLayer;

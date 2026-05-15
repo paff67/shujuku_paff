@@ -15,7 +15,7 @@
 import typescript from '@rollup/plugin-typescript';
 import commonjs from '@rollup/plugin-commonjs';
 import nodeResolve from '@rollup/plugin-node-resolve';
-import { readFileSync, copyFileSync, mkdirSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -140,19 +140,36 @@ const extensionConfig = {
   plugins: [
     ...sharedPlugins,
     createTsPlugin(),
-    // 构建完成后复制 manifest.json 到 dist/extension/
+    // 构建完成后生成标准 extension 产物，并同步根目录直装文件。
+    // SillyTavern 直装读取仓库根目录 manifest.json 中的 js: "index.js"，
+    // 所以 extension 构建成功后必须让根目录 index.js 始终等于 dist/extension/index.js。
     {
-      name: 'copy-manifest',
+      name: 'sync-extension-artifacts',
       writeBundle() {
-        try {
-          mkdirSync(join(__dirname, 'dist', 'extension'), { recursive: true });
-          copyFileSync(
-            join(__dirname, 'manifest.json'),
-            join(__dirname, 'dist', 'extension', 'manifest.json')
-          );
-        } catch (e) {
-          console.warn('复制 manifest.json 失败:', e.message);
+        const distExtensionDir = join(__dirname, 'dist', 'extension');
+        const distIndex = join(distExtensionDir, 'index.js');
+        const distManifest = join(distExtensionDir, 'manifest.json');
+        const rootIndex = join(__dirname, 'index.js');
+        const rootManifest = join(__dirname, 'manifest.json');
+
+        mkdirSync(distExtensionDir, { recursive: true });
+
+        if (!existsSync(distIndex)) {
+          throw new Error(`extension 构建产物缺失: ${distIndex}`);
         }
+
+        if (!existsSync(rootManifest)) {
+          throw new Error(`根目录 manifest.json 缺失: ${rootManifest}`);
+        }
+
+        copyFileSync(rootManifest, distManifest);
+
+        if (!existsSync(distManifest)) {
+          throw new Error(`extension manifest 复制失败: ${distManifest}`);
+        }
+
+        copyFileSync(distIndex, rootIndex);
+        copyFileSync(distManifest, rootManifest);
       },
     },
   ],

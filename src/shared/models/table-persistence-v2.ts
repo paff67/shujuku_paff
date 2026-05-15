@@ -22,6 +22,10 @@ export interface TableLayerDeltaV2_ACU {
   kind: 'delta';
   version: 2;
   deltaId: string;
+  /**
+   * 同一消息楼层内的确定性回放顺序。旧数据可能缺失该字段，读取端会按数组顺序兼容。
+   */
+  sequence?: number;
   createdAt: string;
   isolationKey: string;
   baseCheckpointId?: string;
@@ -60,7 +64,15 @@ export type RowChangeV2_ACU =
 export interface TablePersistenceLayerV2_ACU {
   version: 2;
   checkpoint?: TableCheckpointV2_ACU;
+  /**
+   * 旧版单 delta 字段，同时作为新格式下“最新 delta”的兼容镜像。
+   * 当 deltas 存在且非空时，读取端必须以 deltas 为权威，避免重复回放该镜像。
+   */
   delta?: TableLayerDeltaV2_ACU;
+  /**
+   * 同一消息楼层内的有序 delta 日志。按 sequence / 数组顺序依次回放。
+   */
+  deltas?: TableLayerDeltaV2_ACU[];
 }
 
 export interface CreateTableDeltaOptions_ACU {

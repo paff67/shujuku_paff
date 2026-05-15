@@ -1,4 +1,5 @@
 import type { ACUMessage } from '../../shared/host-api';
+import { getTablePersistenceDeltasV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 
 export interface TableHistoryState_ACU {
     latestAiMessageIndex: number;
@@ -36,11 +37,14 @@ function hasTableDataInMessage_ACU(msg: any, options: ResolveTableHistoryOptions
     if (layer?.checkpoint?.data?.[sheetKey]) {
         return true;
     }
-    if (Array.isArray(layer?.delta?.changedSheets) && layer.delta.changedSheets.includes(sheetKey)) {
-        return true;
-    }
-    if (layer?.delta?.changesBySheet?.[sheetKey]) {
-        return true;
+
+    for (const delta of getTablePersistenceDeltasV2_ACU(layer)) {
+        if (Array.isArray(delta.changedSheets) && delta.changedSheets.includes(sheetKey)) {
+            return true;
+        }
+        if (delta.changesBySheet?.[sheetKey]) {
+            return true;
+        }
     }
 
     if (msg?.TavernDB_ACU_IsolatedData?.[isolationKey]?.independentData?.[sheetKey]) {
@@ -63,11 +67,14 @@ function hasTrackedUpdateInMessage_ACU(msg: any, options: ResolveTableHistoryOpt
     const { sheetKey, isolationKey, settings } = options;
     const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
     const layer = getTablePersistenceLayerV2_ACU(msg, isolationKey);
-    const v2ModifiedKeys = Array.isArray(layer?.delta?.modifiedKeys) ? layer.delta.modifiedKeys : [];
-    const v2UpdateGroupKeys = Array.isArray(layer?.delta?.updateGroupKeys) ? layer.delta.updateGroupKeys : [];
 
-    if (v2UpdateGroupKeys.includes(sheetKey) || v2ModifiedKeys.includes(sheetKey)) {
-        return true;
+    for (const delta of getTablePersistenceDeltasV2_ACU(layer)) {
+        const v2ModifiedKeys = Array.isArray(delta.modifiedKeys) ? delta.modifiedKeys : [];
+        const v2UpdateGroupKeys = Array.isArray(delta.updateGroupKeys) ? delta.updateGroupKeys : [];
+
+        if (v2UpdateGroupKeys.includes(sheetKey) || v2ModifiedKeys.includes(sheetKey)) {
+            return true;
+        }
     }
 
     const isolatedModifiedKeys = Array.isArray(tagData?.modifiedKeys) ? tagData.modifiedKeys : [];

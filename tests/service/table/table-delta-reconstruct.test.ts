@@ -144,6 +144,45 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
+  it('同一消息的 deltas 按 sequence 顺序累计回放，并保留 delta 最新镜像兼容', () => {
+    const firstDelta = {
+      ...delta([{ op: 'upsert', rowId: '1', rowIndexHint: 1, row: ['1', '银剑'] }]),
+      deltaId: 'delta-first',
+      sequence: 0,
+    };
+    const secondDelta = {
+      ...delta([{ op: 'upsert', rowId: '2', rowIndexHint: 2, row: ['2', '木盾'] }]),
+      deltaId: 'delta-second',
+      sequence: 1,
+    };
+    const chat = [
+      aiMessage({
+        version: 2,
+        checkpoint: checkpoint(makeData(makeSheet([['row_id', '名称'], ['base', '铁剑']]))),
+        deltas: [secondDelta, firstDelta],
+        delta: secondDelta,
+      }),
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, { allowLegacyMigration: false });
+
+    expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
+      ['row_id', '名称'],
+      ['1', '银剑'],
+      ['2', '木盾'],
+      ['base', '铁剑'],
+    ]);
+  });
+
+  it('存在 deltas 时不重复应用 delta 最新镜像', () => {
+    const mirroredDelta = delta([{ op: 'upsert', rowId: '1', rowIndexHint: 1, row: ['1', '银剑'] }]);
+    const chat = [aiMessage({ version: 2, deltas: [mirroredDelta], delta: mirroredDelta })];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, { allowLegacyMigration: false });
+
+    expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([['row_id'], ['1', '银剑']]);
+  });
+
   it('targetMessageIndexExclusive 会排除目标层之后的 delta', () => {
     const chat = [
       aiMessage({ version: 2, checkpoint: checkpoint(makeData(makeSheet([['row_id', '名称'], ['1', '铁剑']]))) }),

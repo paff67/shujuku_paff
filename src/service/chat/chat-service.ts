@@ -27,6 +27,7 @@ import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_A
 import { rollupCheckpointBeforePurge_ACU } from '../table/table-delta-retention';
 import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
 import { assignSummaryVectorIndexStateToTagData_ACU } from '../vector/summary-vector-index-state-service';
+import { pruneTablePersistenceLayerSheetKeysV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 
 // ─── 业务逻辑函数（从 presentation 层搬迁） ───
 
@@ -566,9 +567,13 @@ function purgeAllTableDeltaFromMessage_ACU(msg: any, isolationKey: string, isola
     let changed = false;
     const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
     const layer = tagData?.tablePersistenceV2;
-    if (layer && typeof layer === 'object' && layer.delta) {
-        delete layer.delta;
-        if (!layer.checkpoint) {
+    if (layer && typeof layer === 'object' && (layer.delta || Array.isArray(layer.deltas))) {
+        if (layer.delta) delete layer.delta;
+        if (Array.isArray(layer.deltas)) delete layer.deltas;
+        const checkpointHasSheets = !!layer.checkpoint?.data
+            && typeof layer.checkpoint.data === 'object'
+            && Object.keys(layer.checkpoint.data).some((key: string) => key.startsWith('sheet_'));
+        if (!checkpointHasSheets) {
             delete tagData.tablePersistenceV2;
         }
         changed = true;
@@ -626,35 +631,15 @@ function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]
     const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
     if (tagData && typeof tagData === 'object') {
         const layer = tagData.tablePersistenceV2;
-        const delta = layer?.delta;
-        if (delta && typeof delta === 'object') {
-            targetSheetKeys.forEach(sheetKey => {
-                if (delta.changesBySheet?.[sheetKey]) {
-                    delete delta.changesBySheet[sheetKey];
-                    changed = true;
-                }
-            });
-            if (Array.isArray(delta.changedSheets)) {
-                const nextChangedSheets = delta.changedSheets.filter((key: string) => !targetSheetKeys.includes(key));
-                if (nextChangedSheets.length !== delta.changedSheets.length) changed = true;
-                delta.changedSheets = nextChangedSheets;
-            }
-            if (Array.isArray(delta.modifiedKeys)) {
-                const nextModifiedKeys = delta.modifiedKeys.filter((key: string) => !targetSheetKeys.includes(key));
-                if (nextModifiedKeys.length !== delta.modifiedKeys.length) changed = true;
-                delta.modifiedKeys = nextModifiedKeys;
-            }
-            if (Array.isArray(delta.updateGroupKeys)) {
-                const nextUpdateGroupKeys = delta.updateGroupKeys.filter((key: string) => !targetSheetKeys.includes(key));
-                if (nextUpdateGroupKeys.length !== delta.updateGroupKeys.length) changed = true;
-                delta.updateGroupKeys = nextUpdateGroupKeys;
-            }
-            const hasRemainingDeltaSheets = delta.changesBySheet && Object.keys(delta.changesBySheet).length > 0;
-            if (!hasRemainingDeltaSheets && (!Array.isArray(delta.changedSheets) || delta.changedSheets.length === 0)) {
-                delete layer.delta;
-                if (!layer.checkpoint) {
+        if (layer && typeof layer === 'object') {
+            const pruneResult = pruneTablePersistenceLayerSheetKeysV2_ACU(layer, targetSheetKeys);
+            if (pruneResult.changed) {
+                if (pruneResult.layer) {
+                    tagData.tablePersistenceV2 = pruneResult.layer;
+                } else {
                     delete tagData.tablePersistenceV2;
                 }
+                changed = true;
             }
         }
 

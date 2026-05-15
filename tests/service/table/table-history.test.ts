@@ -109,6 +109,76 @@ describe('resolveTableHistoryStateFromChat_ACU — V2 table persistence', () => 
     expect(state.hasTrackedUpdate).toBe(true);
   });
 
+  it('识别 V2 deltas 中任一记录的目标表数据', () => {
+    const chat = [
+      makeV2Message({
+        version: 2,
+        delta: {
+          kind: 'delta',
+          version: 2,
+          deltaId: 'delta-latest',
+          createdAt: '2026-05-08T00:00:01.000Z',
+          isolationKey: '',
+          changedSheets: ['sheet_1'],
+          modifiedKeys: [],
+          updateGroupKeys: [],
+          changesBySheet: {
+            sheet_1: { sheetKey: 'sheet_1', rowChanges: [{ op: 'upsert', rowId: 'x', row: ['x'] }] },
+          },
+          sequence: 1,
+        },
+        deltas: [
+          {
+            kind: 'delta',
+            version: 2,
+            deltaId: 'delta-target',
+            createdAt: '2026-05-08T00:00:00.000Z',
+            isolationKey: '',
+            changedSheets: ['sheet_0'],
+            modifiedKeys: [],
+            updateGroupKeys: [],
+            changesBySheet: {
+              sheet_0: { sheetKey: 'sheet_0', rowChanges: [{ op: 'upsert', rowId: '1', row: ['1'] }] },
+            },
+            sequence: 0,
+          },
+        ],
+      }),
+    ];
+
+    const state = resolveTableHistoryStateFromChat_ACU(chat, makeOptions());
+
+    expect(state.latestDataMessageIndex).toBe(0);
+    expect(state.hasAnyData).toBe(true);
+  });
+
+  it('识别 V2 deltas 中任一记录的 tracked update', () => {
+    const chat = [
+      makeV2Message({
+        version: 2,
+        deltas: [
+          {
+            kind: 'delta',
+            version: 2,
+            deltaId: 'delta-tracked',
+            createdAt: '2026-05-08T00:00:00.000Z',
+            isolationKey: '',
+            changedSheets: [],
+            modifiedKeys: ['sheet_0'],
+            updateGroupKeys: ['sheet_0'],
+            changesBySheet: {},
+            sequence: 0,
+          },
+        ],
+      }),
+    ];
+
+    const state = resolveTableHistoryStateFromChat_ACU(chat, makeOptions());
+
+    expect(state.lastTrackedUpdateMessageIndex).toBe(0);
+    expect(state.hasTrackedUpdate).toBe(true);
+  });
+
   it('按 isolationKey 只识别当前标签的 V2 layer', () => {
     const chat = [
       makeV2Message({

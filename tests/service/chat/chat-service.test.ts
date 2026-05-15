@@ -414,17 +414,47 @@ describe('clearTableDataAtFloors_ACU', () => {
             delta: {
               kind: 'delta',
               version: 2,
-              deltaId: 'delta-1',
-              createdAt: '2026-05-08T00:00:01.000Z',
+              deltaId: 'delta-2',
+              createdAt: '2026-05-08T00:00:02.000Z',
               isolationKey: '',
-              changedSheets: ['sheet_0', 'sheet_1'],
-              modifiedKeys: ['sheet_0', 'sheet_1'],
-              updateGroupKeys: ['sheet_0', 'sheet_1'],
+              changedSheets: ['sheet_1'],
+              modifiedKeys: ['sheet_1'],
+              updateGroupKeys: ['sheet_1'],
               changesBySheet: {
-                sheet_0: { sheetKey: 'sheet_0', rowChanges: [{ op: 'upsert', rowId: '2', row: ['2'] }] },
                 sheet_1: { sheetKey: 'sheet_1', rowChanges: [{ op: 'upsert', rowId: '3', row: ['3'] }] },
               },
+              sequence: 1,
             },
+            deltas: [
+              {
+                kind: 'delta',
+                version: 2,
+                deltaId: 'delta-1',
+                createdAt: '2026-05-08T00:00:01.000Z',
+                isolationKey: '',
+                changedSheets: ['sheet_0'],
+                modifiedKeys: ['sheet_0'],
+                updateGroupKeys: ['sheet_0'],
+                changesBySheet: {
+                  sheet_0: { sheetKey: 'sheet_0', rowChanges: [{ op: 'upsert', rowId: '2', row: ['2'] }] },
+                },
+                sequence: 0,
+              },
+              {
+                kind: 'delta',
+                version: 2,
+                deltaId: 'delta-2',
+                createdAt: '2026-05-08T00:00:02.000Z',
+                isolationKey: '',
+                changedSheets: ['sheet_1'],
+                modifiedKeys: ['sheet_1'],
+                updateGroupKeys: ['sheet_1'],
+                changesBySheet: {
+                  sheet_1: { sheetKey: 'sheet_1', rowChanges: [{ op: 'upsert', rowId: '3', row: ['3'] }] },
+                },
+                sequence: 1,
+              },
+            ],
           },
         },
       },
@@ -448,7 +478,9 @@ describe('clearTableDataAtFloors_ACU', () => {
     const tagData = msg.TavernDB_ACU_IsolatedData[''];
     expect(count).toBe(1);
     expect(tagData.tablePersistenceV2.checkpoint).toBeDefined();
-    expect(tagData.tablePersistenceV2.delta.changesBySheet.sheet_0).toBeUndefined();
+    expect(tagData.tablePersistenceV2.deltas).toHaveLength(1);
+    expect(tagData.tablePersistenceV2.deltas[0].deltaId).toBe('delta-2');
+    expect(tagData.tablePersistenceV2.deltas[0].changesBySheet.sheet_1).toBeDefined();
     expect(tagData.tablePersistenceV2.delta.changesBySheet.sheet_1).toBeDefined();
     expect(tagData.tablePersistenceV2.delta.changedSheets).toEqual(['sheet_1']);
     expect(tagData.tablePersistenceV2.delta.modifiedKeys).toEqual(['sheet_1']);
@@ -461,7 +493,8 @@ describe('clearTableDataAtFloors_ACU', () => {
   it('目标表清理后 delta 为空时删除 delta 但保留 checkpoint', async () => {
     const msg = makeV2Message();
     const tagData = msg.TavernDB_ACU_IsolatedData[''];
-    delete tagData.tablePersistenceV2.delta.changesBySheet.sheet_1;
+    tagData.tablePersistenceV2.deltas = [tagData.tablePersistenceV2.deltas[0]];
+    tagData.tablePersistenceV2.delta = tagData.tablePersistenceV2.deltas[0];
     tagData.tablePersistenceV2.delta.changedSheets = ['sheet_0'];
     tagData.tablePersistenceV2.delta.modifiedKeys = ['sheet_0'];
     tagData.tablePersistenceV2.delta.updateGroupKeys = ['sheet_0'];
@@ -472,6 +505,7 @@ describe('clearTableDataAtFloors_ACU', () => {
     expect(count).toBe(1);
     expect(tagData.tablePersistenceV2.checkpoint).toBeDefined();
     expect(tagData.tablePersistenceV2.delta).toBeUndefined();
+    expect(tagData.tablePersistenceV2.deltas).toBeUndefined();
     expect(mockSaveChatToHost).toHaveBeenCalled();
   });
 
@@ -485,6 +519,7 @@ describe('clearTableDataAtFloors_ACU', () => {
     expect(count).toBe(1);
     expect(tagData.tablePersistenceV2.checkpoint).toBeDefined();
     expect(tagData.tablePersistenceV2.delta).toBeUndefined();
+    expect(tagData.tablePersistenceV2.deltas).toBeUndefined();
     expect(tagData.independentData).toEqual({});
     expect(tagData.modifiedKeys).toEqual([]);
     expect(tagData.updateGroupKeys).toEqual([]);

@@ -13,6 +13,7 @@
 
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import type { Sheet_ACU } from '../../shared/models/table-data';
+import { pruneTablePersistenceLayerSheetKeysV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 import type {
     IsolationTagData_ACU,
     IsolatedDataContainer_ACU,
@@ -361,67 +362,17 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
             }
 
             // ── V2：checkpoint + delta 字段级清理 ──
-            const layer = tagData.tablePersistenceV2;
-            if (layer && typeof layer === 'object' && layer.version === 2) {
-                let layerChanged = false;
-
-                if (layer.checkpoint?.data && typeof layer.checkpoint.data === 'object') {
-                    sheetKeys.forEach(k => {
-                        if ((layer.checkpoint!.data as any)[k]) {
-                            delete (layer.checkpoint!.data as any)[k];
-                            layerChanged = true;
-                        }
-                    });
-                }
-
-                if (layer.delta && typeof layer.delta === 'object') {
-                    const delta = layer.delta;
-                    const nextChangedSheets = Array.isArray(delta.changedSheets)
-                        ? delta.changedSheets.filter(k => !sheetKeys.includes(k))
-                        : [];
-                    if (nextChangedSheets.length !== (delta.changedSheets || []).length) {
-                        delta.changedSheets = nextChangedSheets;
-                        layerChanged = true;
+            if (tagData.tablePersistenceV2 && typeof tagData.tablePersistenceV2 === 'object') {
+                const pruneResult = pruneTablePersistenceLayerSheetKeysV2_ACU(
+                    tagData.tablePersistenceV2,
+                    sheetKeys,
+                );
+                if (pruneResult.changed) {
+                    if (pruneResult.layer) {
+                        tagData.tablePersistenceV2 = pruneResult.layer;
+                    } else {
+                        delete tagData.tablePersistenceV2;
                     }
-
-                    const nextModifiedKeys = Array.isArray(delta.modifiedKeys)
-                        ? delta.modifiedKeys.filter(k => !sheetKeys.includes(k))
-                        : [];
-                    if (nextModifiedKeys.length !== (delta.modifiedKeys || []).length) {
-                        delta.modifiedKeys = nextModifiedKeys;
-                        layerChanged = true;
-                    }
-
-                    const nextUpdateGroupKeys = Array.isArray(delta.updateGroupKeys)
-                        ? delta.updateGroupKeys.filter(k => !sheetKeys.includes(k))
-                        : [];
-                    if (nextUpdateGroupKeys.length !== (delta.updateGroupKeys || []).length) {
-                        delta.updateGroupKeys = nextUpdateGroupKeys;
-                        layerChanged = true;
-                    }
-
-                    if (delta.changesBySheet && typeof delta.changesBySheet === 'object') {
-                        sheetKeys.forEach(k => {
-                            if (delta.changesBySheet[k]) {
-                                delete delta.changesBySheet[k];
-                                layerChanged = true;
-                            }
-                        });
-                    }
-
-                    if (!delta.changedSheets || delta.changedSheets.length === 0 || !hasAnySheetKey(delta.changesBySheet)) {
-                        delete layer.delta;
-                        layerChanged = true;
-                    }
-                }
-
-                const checkpointHasSheets = !!layer.checkpoint?.data && hasAnySheetKey(layer.checkpoint.data);
-                if (!checkpointHasSheets && !layer.delta) {
-                    delete tagData.tablePersistenceV2;
-                    layerChanged = true;
-                }
-
-                if (layerChanged) {
                     msgChanged = true;
                 }
             }

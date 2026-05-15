@@ -12,6 +12,10 @@ import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-d
 import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 import { clearCurrentIsolationLegacyTableSnapshots_ACU, readTablePersistenceLayerV2_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
 import type { TableCheckpointV2_ACU, TablePersistenceLayerV2_ACU } from './table-delta-types';
+import {
+  getTablePersistenceDeltasV2_ACU,
+  hasTablePersistenceDeltasV2_ACU,
+} from '../../shared/models/table-persistence-v2-utils';
 
 function cloneJson_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -179,8 +183,10 @@ export function migrateLegacyCheckpointToMessage_ACU(
     version: 2,
     checkpoint: cloneJson_ACU(checkpoint),
   };
-  if (existingLayer?.delta) {
-    layer.delta = cloneJson_ACU(existingLayer.delta);
+  const existingDeltas = getTablePersistenceDeltasV2_ACU(existingLayer);
+  if (existingDeltas.length > 0) {
+    layer.deltas = existingDeltas.map(delta => cloneJson_ACU(delta));
+    layer.delta = cloneJson_ACU(existingDeltas[existingDeltas.length - 1]);
   }
   writeTablePersistenceLayerV2_ACU(msg, isolationKey, layer);
 }
@@ -208,7 +214,7 @@ function messageHasCurrentIsolationLocalTableLayer_ACU(
   if (!message || message.is_user) return false;
 
   const layer = readTablePersistenceLayerV2_ACU(message, isolationKey);
-  if (layer?.checkpoint || layer?.delta) return true;
+  if (layer?.checkpoint || hasTablePersistenceDeltasV2_ACU(layer)) return true;
 
   const tagData = readIsolatedTagData_ACU(message, isolationKey);
   if (hasAnySheetKey_ACU(tagData?.independentData)) return true;

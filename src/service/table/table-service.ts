@@ -23,6 +23,10 @@ import { cloneIsolatedData_ACU, writeIsolatedTagData_ACU, writeMessageIdentity_A
 import { createTableDeltaFromBeforeAfter_ACU } from './table-delta-diff';
 import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
 import { clearCurrentIsolationLegacyTableSnapshots_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
+import {
+  appendTablePersistenceDeltaToLayerV2_ACU,
+  hasTablePersistenceDeltasV2_ACU,
+} from '../../shared/models/table-persistence-v2-utils';
 
 export interface TableChatPersistOptions_ACU {
   targetMessageIndex?: number;
@@ -262,18 +266,19 @@ export async function persistTablesToChatMessage_ACU(
     baseCheckpointId: baseCheckpoint?.checkpointId,
   });
 
+  const existingPersistenceLayer = currentTagData.tablePersistenceV2;
   if (delta) {
-    currentTagData.tablePersistenceV2 = {
-      version: 2,
+    currentTagData.tablePersistenceV2 = appendTablePersistenceDeltaToLayerV2_ACU(
+      existingPersistenceLayer,
       delta,
-    };
-  } else {
+    );
+  } else if (!existingPersistenceLayer?.checkpoint && !hasTablePersistenceDeltasV2_ACU(existingPersistenceLayer)) {
     delete currentTagData.tablePersistenceV2;
   }
 
   writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
 
-  if (delta) {
+  if (currentTagData.tablePersistenceV2) {
     writeTablePersistenceLayerV2_ACU(targetMessage, currentIsolationKey, currentTagData.tablePersistenceV2!);
   }
 

@@ -4,6 +4,7 @@
  * 验证 load → modify → save → reload 的数据一致性
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { getTablePersistenceDeltasV2_ACU } from '../../src/shared/models/table-persistence-v2-utils';
 
 // ── 构造可变 chat 数组模拟真实存储 ──
 const { mockChat, mockSettings, mockCurrentJsonTableDataRef } = vi.hoisted(() => ({
@@ -100,7 +101,9 @@ vi.mock('../../src/service/runtime/helpers-remaining', () => ({
       if (!msg || msg.is_user) continue;
       const layer = msg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
       if (layer?.checkpoint) reconstructed = cloneJson_ACU(layer.checkpoint.data);
-      if (layer?.delta) reconstructed = applyTestDelta_ACU(reconstructed, layer.delta);
+      for (const delta of getTablePersistenceDeltasV2_ACU(layer)) {
+        reconstructed = applyTestDelta_ACU(reconstructed, delta);
+      }
     }
     if (reconstructed) return reconstructed;
 

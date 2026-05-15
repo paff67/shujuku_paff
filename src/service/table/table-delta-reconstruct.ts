@@ -5,6 +5,7 @@ import { applyTableDelta_ACU } from './table-delta-apply';
 import { buildLegacyCheckpointFromChat_ACU, migrateLegacyCheckpointToRootMessage_ACU } from './table-delta-migration';
 import { readTablePersistenceLayerV2_ACU } from './table-delta-repository';
 import type { ReconstructTablesFromChatDeltasOptions_ACU, TableCheckpointV2_ACU } from './table-delta-types';
+import { getTablePersistenceDeltasV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 
 function cloneJson_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -66,8 +67,8 @@ export function reconstructTablesFromChatDeltas_ACU(
       data = cloneJson_ACU(layer.checkpoint.data);
     }
 
-    if (layer.delta) {
-      data = applyTableDelta_ACU(data, layer.delta);
+    for (const delta of getTablePersistenceDeltasV2_ACU(layer)) {
+      data = applyTableDelta_ACU(data, delta);
     }
   }
 
@@ -139,8 +140,9 @@ export function reconstructTablesFromChatDeltas_ACU(
     const message = chat[i];
     if (!message || message.is_user) continue;
     const layer = readTablePersistenceLayerV2_ACU(message, context.isolationKey);
-    if (!layer?.delta) continue;
-    data = applyTableDelta_ACU(data, layer.delta);
+    for (const delta of getTablePersistenceDeltasV2_ACU(layer)) {
+      data = applyTableDelta_ACU(data, delta);
+    }
   }
 
   return {

@@ -7,9 +7,9 @@
   "scripts": {
     "build": "rollup -c && bash scripts/check-arch.sh",
     "build:nocheck": "rollup -c",
-    "build:concat": "BUILD_MODE=concat rollup -c",
-    "build:extension": "BUILD_MODE=extension rollup -c",
-    "build:all": "BUILD_MODE=all rollup -c",
+    "build:concat": "node scripts/run-rollup.mjs concat",
+    "build:extension": "node scripts/run-rollup.mjs extension",
+    "build:all": "node scripts/run-rollup.mjs all",
     "publish:extension": "bash scripts/publish-extension.sh",
     "verify": "bash scripts/verify-build.sh",
     "typecheck": "tsc --noEmit",

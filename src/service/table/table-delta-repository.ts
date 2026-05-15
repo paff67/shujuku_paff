@@ -1,6 +1,11 @@
 import type { IsolationConfig_ACU, IsolationTagData_ACU, IsolatedDataContainer_ACU } from '../../data/models/chat-message-data';
 import { initIsolatedTagSlot_ACU, isLegacyMatchForIsolation_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import type { TablePersistenceLayerV2_ACU } from './table-delta-types';
+import type { TableLayerDeltaV2_ACU } from '../../shared/models/table-persistence-v2';
+import {
+  appendTablePersistenceDeltaToLayerV2_ACU,
+  hasTablePersistenceDeltasV2_ACU,
+} from '../../shared/models/table-persistence-v2-utils';
 
 function safeClone_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -29,7 +34,7 @@ function hasAnySheetKey_ACU(value: any): boolean {
 function hasMeaningfulIsolatedTagData_ACU(tagData: IsolationTagData_ACU | null | undefined): boolean {
   if (!tagData || typeof tagData !== 'object') return false;
   if (hasAnySheetKey_ACU(tagData.independentData)) return true;
-  if (tagData.tablePersistenceV2?.checkpoint || tagData.tablePersistenceV2?.delta) return true;
+  if (tagData.tablePersistenceV2?.checkpoint || hasTablePersistenceDeltasV2_ACU(tagData.tablePersistenceV2)) return true;
   if (tagData.vectorMemoryState !== undefined) return true;
   if (tagData.summaryVectorIndexState !== undefined) return true;
   if (tagData.summaryVectorIndexManifest !== undefined) return true;
@@ -55,6 +60,21 @@ export function writeTablePersistenceLayerV2_ACU(
   if (!msg) return;
   const tagData = initIsolatedTagSlot_ACU(msg, isolationKey);
   tagData.tablePersistenceV2 = safeClone_ACU(layer);
+}
+
+export function appendTablePersistenceDeltaV2_ACU(
+  msg: any,
+  isolationKey: string,
+  delta: TableLayerDeltaV2_ACU,
+): TablePersistenceLayerV2_ACU | null {
+  if (!msg || !delta) return null;
+  const tagData = initIsolatedTagSlot_ACU(msg, isolationKey);
+  const nextLayer = appendTablePersistenceDeltaToLayerV2_ACU(
+    tagData.tablePersistenceV2,
+    delta,
+  );
+  tagData.tablePersistenceV2 = safeClone_ACU(nextLayer);
+  return tagData.tablePersistenceV2;
 }
 
 export function clearCurrentIsolationLegacyTableSnapshots_ACU(
@@ -114,7 +134,7 @@ export function clearCurrentIsolationLegacyTableSnapshots_ACU(
 
 export function messageHasTablePersistenceV2_ACU(msg: any, isolationKey: string): boolean {
   const layer = readTablePersistenceLayerV2_ACU(msg, isolationKey);
-  return !!(layer?.checkpoint || layer?.delta);
+  return !!(layer?.checkpoint || hasTablePersistenceDeltasV2_ACU(layer));
 }
 
 export function messageHasLegacyTableSnapshot_ACU(

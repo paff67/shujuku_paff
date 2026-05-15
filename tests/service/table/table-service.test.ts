@@ -261,6 +261,54 @@ describe('saveIndependentTableToChatHistory_ACU', () => {
     expect(mockWriteLegacyStandardAndSummary).not.toHaveBeenCalled();
   });
 
+  it('同一目标消息连续保存时追加 deltas，而不是覆盖旧 delta', async () => {
+    const aiMsg: any = { is_user: false, mes: 'AI回复' };
+    const chat = [aiMsg];
+    mockGetChatArray.mockReturnValue(chat);
+
+    await persistTablesToChatMessage_ACU({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_0'],
+      updateGroupKeys: ['sheet_0'],
+      trackingSheetKeys: ['sheet_0'],
+      beforeData: {
+        mate: { type: 'chatSheets' },
+        sheet_0: { name: '背包物品表', content: [['row_id', '物品名']] },
+      } as any,
+      afterData: {
+        mate: { type: 'chatSheets' },
+        sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+      } as any,
+    });
+
+    await persistTablesToChatMessage_ACU({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_1'],
+      updateGroupKeys: ['sheet_1'],
+      trackingSheetKeys: ['sheet_1'],
+      beforeData: {
+        mate: { type: 'chatSheets' },
+        sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+        sheet_1: { name: '纪要表', content: [['row_id', '事件']] },
+      } as any,
+      afterData: {
+        mate: { type: 'chatSheets' },
+        sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+        sheet_1: { name: '纪要表', content: [['row_id', '事件'], ['1', '开始']] },
+      } as any,
+    });
+
+    const layer = aiMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2;
+    expect(layer?.version).toBe(2);
+    expect(layer?.deltas).toHaveLength(2);
+    expect(layer?.deltas[0].changedSheets).toEqual(['sheet_0']);
+    expect(layer?.deltas[0].sequence).toBe(0);
+    expect(layer?.deltas[1].changedSheets).toEqual(['sheet_1']);
+    expect(layer?.deltas[1].sequence).toBe(1);
+    expect(layer?.delta).toEqual(layer?.deltas[1]);
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(2);
+  });
+
   it('阻止 afterData 缺失目标表时把已有真实数据落盘成 clearSheet，并保证回退重建仍保留上一轮数据', async () => {
     const rootMsg: any = {
       is_user: false,

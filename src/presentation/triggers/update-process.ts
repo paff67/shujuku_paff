@@ -26,6 +26,7 @@ import {
     type BatchUpdateResult,
     type CardUpdateProgressEvent,
     type BatchUpdateProgressContext,
+    type ExecuteCardUpdateOptions_ACU,
 } from '../../service/table/update-orchestrator';
 
 // ============================================================
@@ -124,6 +125,7 @@ export async function proceedWithCardUpdate_ACU(
     targetSheetKeys: string[] | null = null,
     requestOptions: Record<string, any> | null = null,
     progressContext: BatchUpdateProgressContext | null = null,
+    executionOptions: ExecuteCardUpdateOptions_ACU = {},
 ): Promise<CardUpdateResult> {
     logDebug_ACU(`[更新流程] proceedWithCardUpdate: 消息数=${messagesToUse.length}, 模式=${updateMode}, 静默=${isSilentMode}, 目标表=${targetSheetKeys?.join(',') || '全部'}`);
     const localAbortController = new AbortController();
@@ -172,7 +174,8 @@ export async function proceedWithCardUpdate_ACU(
             requestOptions,
             localAbortController,
             progressContext,
-            (event) => handleProgressEvent(event, isSilentMode, loadingToast)
+            (event) => handleProgressEvent(event, isSilentMode, loadingToast),
+            executionOptions,
         );
 
         // UI：根据返回值决定后续 UI 操作
@@ -210,9 +213,10 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
             isSilentMode: boolean,
             targetSheetKeys: string[] | null,
             requestOptions: Record<string, any> | null,
-            progressContext: BatchUpdateProgressContext
+            progressContext: BatchUpdateProgressContext,
+            executionOptions?: ExecuteCardUpdateOptions_ACU,
         ): Promise<CardUpdateResult> => {
-            return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext);
+            return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext, executionOptions || {});
         }
     );
 
