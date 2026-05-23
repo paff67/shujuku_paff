@@ -7,7 +7,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-statu
 import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, newMessageDebounceTimer_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU , _set_isAutoUpdatingCard_ACU, _set_newMessageDebounceTimer_ACU} from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
-import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
+import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU, jQuery_API_ACU as jQueryHost_API_ACU } from '../../../shared/host-api';
 import { jQuery_API_ACU } from '../../dom-utils';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU } from '../../../service/ai/ai-service';
@@ -26,7 +26,11 @@ import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } 
 import { executeContentOptimization_ACU } from '../../components/optimization-ui';
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
-import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU, handleFloorIncreaseDelay_ACU } from '../../../service/table/update-scheduler';
+import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU, handleFloorIncreaseDelay_ACU, type AutoUpdateProgressEvent } from '../../../service/table/update-scheduler';
+import { renderStopButton_ACU } from '../../../shared/html-helpers';
+import { bindTableFillStopButton_ACU } from '../../components/status-display';
+import { abortAllActiveRequests_ACU } from '../../../service/runtime/state-manager';
+import { $statusMessageSpan_ACU } from '../../state/ui-refs';
 
   export async function triggerAutomaticUpdateIfNeeded_ACU() {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
@@ -68,14 +72,53 @@ import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoU
     const plan = buildAutoUpdatePlan_ACU(liveChat, currentJsonTableData_ACU, settings_ACU, triggerIsolationKey);
     if (plan.tablesToUpdate.length === 0) return;
 
-    // UI：显示开始 toast
     const totalGroups = Object.keys(plan.updateGroups).length;
-    const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
-    if (totalGroups > maxConcurrentGroups) {
-        showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
-    } else {
-        showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
-    }
+
+    // UI：创建与手动填表一致的进度 toast（带停止按钮）
+    const autoStopButtonId = `acu-stop-auto-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const autoStopButtonHtml = renderStopButton_ACU(autoStopButtonId, '终止');
+    const autoInitialMessage = `正在准备自动填表（${totalGroups} 组）...`;
+    const autoToastMessage = `<div><span class="acu-toast-progress-message">${autoInitialMessage}</span>${autoStopButtonHtml}</div>`;
+    let autoLoadingToast: any = null;
+
+    try {
+      if (typeof toastr_API_ACU !== 'undefined') {
+        try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableFillStart(); } catch (_) {}
+        autoLoadingToast = showToastr_ACU('info', autoToastMessage, {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+            onShown: function () {
+                if (typeof bindTableFillStopButton_ACU === 'function') {
+                    bindTableFillStopButton_ACU(autoStopButtonId, () => {
+                        _set_isAutoUpdatingCard_ACU(false);
+                        abortAllActiveRequests_ACU();
+                        if ($statusMessageSpan_ACU) $statusMessageSpan_ACU.text('自动填表已终止...');
+                        if (autoLoadingToast) autoLoadingToast.find('.acu-toast-progress-message').text('自动填表已终止...');
+                        showToastr_ACU('warning', '自动填表任务已由用户终止。');
+                    });
+                }
+            },
+        });
+      }
+    } catch (_) { /* toast 创建失败不阻断业务 */ }
+
+    // 构建自动进度回调（与手动填表进度更新逻辑一致）
+    const autoOnProgress = (event: AutoUpdateProgressEvent) => {
+        const phaseMessages: Record<string, string> = {
+            'preparing': `正在准备自动填表（${event.totalGroups} 组）...`,
+            'calling_ai': `正在调用 AI 生成更新...`,
+            'merging': `正在合并 AI 编辑结果...`,
+            'applying': `正在执行合并编辑...`,
+            'saving': `正在保存更新到聊天记录...`,
+            'complete': `${event.totalGroups} 组自动更新完成！`,
+            'error': `更新出错：${event.message || '未知错误'}`,
+        };
+        const msg = phaseMessages[event.phase] || event.message || '正在处理...';
+        if ($statusMessageSpan_ACU) $statusMessageSpan_ACU.text(msg);
+        if (autoLoadingToast) autoLoadingToast.find('.acu-toast-progress-message').text(msg);
+    };
 
     // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
     const result = await executeAutoUpdatePlan_ACU(
@@ -87,8 +130,15 @@ import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoU
             refreshData: () => refreshMergedDataAndNotifyWithUI_ACU(),
             loadAllChatMessages: () => loadAllChatMessages_ACU(),
             purgeOldLayerData: () => purgeOldLayerData_ACU(),
-        }
+        },
+        autoOnProgress,
     );
+
+    // 清除进度 toast
+    if (autoLoadingToast && toastr_API_ACU) {
+        toastr_API_ACU.clear(autoLoadingToast);
+    }
+
 
     // UI：根据返回值显示结果
     if (result.failedGroups > 0) {

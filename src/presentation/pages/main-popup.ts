@@ -118,7 +118,7 @@ function generateThemeSelectorHTMLForChrome(): string {
     
     createACUWindow({
       id: windowId,
-      title: 'SP·数据库 III',
+      title: 'SP·数据库 IV',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度

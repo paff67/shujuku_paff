@@ -1,0 +1,757 @@
+{
+  "sheet_dCudvUnH": {
+    "uid": "sheet_dCudvUnH",
+    "name": "全局数据表",
+    "sourceData": {
+      "note": "记录当前主角所在地点及时间相关参数。此表有且仅有一行。\n- 列0: 主角当前所在地点 - 主角当前所在的具体场景名称。\n- 列1: 当前时间 - 游戏世界的当前时间。格式: YYYY-MM-DD HH:MM，初始化时如果剧情没有明确具体的日期和时间，则必须根据世界观和设定自行设定一个明确的日期时间。\n- 列2: 上轮场景时间 - 上一轮交互结束时的时间。\n- 列3: 经过的时间 - 根据当前与上轮时间计算得出的文本描述（如: 几分钟）。\n- 列4: 本轮故事模式 - 当前轮次实际处于的模式，由前端UI读取决定界面显示。只能在三个模式中选择：战斗模式、正常模式、NSFW模式。\n- 列5: 预计下轮故事模式 - 根据正文最后当前剧情所处状态，分析下轮剧情可能处于的模式。只能在三个模式中选择：战斗模式、正常模式、NSFW模式。",
+      "initNode": "插入一条关于当前世界状态的记录。",
+      "deleteNode": "禁止删除。",
+      "updateNode": "当主角从当前所在区域离开时，更新所在地点。每轮必须更新时间、本轮故事模式和预计下轮故事模式。",
+      "insertNode": "禁止操作。",
+      "ddl": "CREATE TABLE global_state ( -- 全局数据表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  current_location TEXT, -- 主角当前所在地点\n  current_time TEXT, -- 当前时间\n  last_scene_time TEXT, -- 上轮场景时间\n  elapsed_time TEXT, -- 经过的时间\n  current_story_mode TEXT, -- 本轮故事模式\n  next_story_mode TEXT -- 预计下轮故事模式\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "全局数据表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "全局数据表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "before_character_definition",
+        "depth": 2,
+        "order": 99981
+      },
+      "fixedIndexPlacement": {
+        "position": "before_character_definition",
+        "depth": 2,
+        "order": 99982
+      }
+    },
+    "orderNo": 0
+  },
+  "sheet_DpKcVGqg": {
+    "uid": "sheet_DpKcVGqg",
+    "name": "主角信息",
+    "sourceData": {
+      "note": "记录主角的核心身份信息和状态。此表有且仅有一行。\n- 列0: 人物名称 - 主角的名字。\n- 列1: 性别/年龄 - 主角的生理性别和年龄。\n- 列2: 外貌特征 - 对主角外貌的客观文字描写。\n- 列3: 职业 - 主角的职业或身份。\n- 列4: 性格特点 - 对主角核心性格的概括。\n- 列5: 当前等级 - 主角当前的等级数值，上限99级。\n- 列6: 当前经验值 - 格式：当前经验/升级所需经验。\n- 列7: 力量 - 力量属性值，影响物理伤害和负重。\n- 列8: 敏捷 - 敏捷属性值，影响行动速度和闪避。\n- 列9: 体质 - 体质属性值，影响生命值上限和恢复。\n- 列10: 智力 - 智力属性值，影响法力值上限和技能效果。\n- 列11: 感知 - 感知属性值，影响命中和侦查能力。\n- 列12: 魅力 - 魅力属性值，影响社交和某些技能效果。\n- 列13: 生命值 - 格式：当前值/最大值，最大值由体质计算。\n- 列14: 体力值 - 格式：当前值/最大值，最大值由体质+力量计算。\n- 列15: 法力值 - 格式：当前值/最大值，最大值由智力计算。\n\n【重要说明】主角的六维属性（力量/敏捷/体质/智力/感知/魅力）不会随着等级提升而自动增加！\n- 初始值由职业决定\n- 升级时由外部插件检测等级变化并给予自由点数供玩家分配\n- 只有通过玩家手动分配自由点数才能提升属性\n- 资源最大值由基础属性计算（加点后变化由外部插件处理）\n- 本表主要记录当前值的损伤/消耗/恢复变化\n\n资源最大值计算公式（基础值）：\n- 生命值上限 = 体质 × 10 + 50\n- 体力值上限 = 体质 × 5 + 力量 × 3 + 20\n- 法力值上限 = 智力 × 8 + 20",
+      "initNode": "游戏初始化时，插入主角的唯一条目。",
+      "deleteNode": "禁止删除。",
+      "updateNode": "当主角各项状态发生改变时更新。",
+      "insertNode": "禁止操作。",
+      "ddl": "CREATE TABLE protagonist_info ( -- 主角信息\n  row_id INTEGER PRIMARY KEY, -- 行号\n  character_name TEXT, -- 人物名称\n  gender_age TEXT, -- 性别/年龄\n  appearance TEXT, -- 外貌特征\n  profession TEXT, -- 职业\n  personality TEXT, -- 性格特点\n  current_level INTEGER, -- 当前等级\n  current_exp TEXT, -- 当前经验值\n  strength INTEGER, -- 力量\n  agility INTEGER, -- 敏捷\n  constitution INTEGER, -- 体质\n  intelligence INTEGER, -- 智力\n  perception INTEGER, -- 感知\n  charisma INTEGER, -- 魅力\n  hp TEXT, -- 生命值\n  stamina TEXT, -- 体力值\n  mp TEXT -- 法力值\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "主角信息",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "主角信息-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      }
+    },
+    "orderNo": 1
+  },
+  "sheet_NcBlYRH5": {
+    "uid": "sheet_NcBlYRH5",
+    "name": "重要角色表",
+    "sourceData": {
+      "note": "记录所有关键NPC的详细信息和动态状态。\n- 列0: 姓名 - NPC的名字。\n- 列1: 性别/年龄 - NPC的生理性别和年龄。\n- 列2: 一句话介绍 - 不超过15字概括角色身份背景。\n- 列3: 外貌特征 - NPC外貌和当前衣着的详细描述。\n- 列4: 持有的重要物品 - 关键物品列表，分号分隔。\n- 列5: 是否离场 - 能否直接与主角互动，填写是或否。\n- 列6: 过往经历 - 角色背景与关键事件，不超过300字。\n- 列7: 职业 - NPC的职业或身份。\n- 列8: 当前等级 - NPC当前的等级数值，上限99级。\n- 列9: 当前经验值 - 格式：当前经验/升级所需经验。\n- 列10: 力量 - 力量属性值。\n- 列11: 敏捷 - 敏捷属性值。\n- 列12: 体质 - 体质属性值。\n- 列13: 智力 - 智力属性值。\n- 列14: 感知 - 感知属性值。\n- 列15: 魅力 - 魅力属性值。\n- 列16: 生命值 - 格式：当前值/最大值。\n- 列17: 体力值 - 格式：当前值/最大值。\n- 列18: 法力值 - 格式：当前值/最大值。\n- 列19: 当前技能 - 最多6个技能，格式：技能名[等级]，分号分隔。\n\n六维属性说明：\n- 初始值由职业决定\n- NPC升级后由系统自动加点（根据职业倾向）\n- 资源最大值由基础属性计算\n- 本表主要记录当前值的变化",
+      "initNode": "游戏初始化时为当前在场的重要人物分别插入一个条目。",
+      "deleteNode": "禁止删除。",
+      "updateNode": "已有角色的状态、关系、想法或经历变化时更新；若角色死亡需在姓名旁标注（已死亡）。",
+      "insertNode": "剧情中有未记录的重要人物登场时添加。",
+      "ddl": "CREATE TABLE important_characters ( -- 重要角色表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  name TEXT, -- 姓名\n  gender_age TEXT, -- 性别/年龄\n  brief_intro TEXT, -- 一句话介绍\n  appearance TEXT, -- 外貌特征\n  key_items TEXT, -- 持有的重要物品\n  is_off_stage TEXT, -- 是否离场\n  back_story TEXT, -- 过往经历\n  profession TEXT, -- 职业\n  current_level INTEGER, -- 当前等级\n  current_exp TEXT, -- 当前经验值\n  strength INTEGER, -- 力量\n  agility INTEGER, -- 敏捷\n  constitution INTEGER, -- 体质\n  intelligence INTEGER, -- 智力\n  perception INTEGER, -- 感知\n  charisma INTEGER, -- 魅力\n  hp TEXT, -- 生命值\n  stamina TEXT, -- 体力值\n  mp TEXT, -- 法力值\n  current_skills TEXT -- 当前技能\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": true,
+      "splitByRow": true,
+      "entryName": "重要人物表",
+      "entryType": "keyword",
+      "keywords": "姓名",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": true,
+      "extraIndexEntryName": "重要人物表-索引",
+      "extraIndexColumns": [
+        "姓名",
+        "一句话介绍"
+      ],
+      "extraIndexColumnModes": {
+        "姓名": "both",
+        "一句话介绍": "index_only"
+      },
+      "extraIndexInjectionTemplate": "以下为已经登场过的角色：\n<已登场角色>\n$1\n</已登场角色>",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 10000,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 10000,
+        "order": 8000
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 10000,
+        "order": 99983
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 10000,
+        "order": 99984
+      }
+    },
+    "orderNo": 2
+  },
+  "sheet_lEARaBa8": {
+    "uid": "sheet_lEARaBa8",
+    "name": "主角技能表",
+    "sourceData": {
+      "note": "记录主角获得的所有技能项目。\n- 列0: 技能名称 - 技能的名称。\n- 列1: 技能类型 - 被动/主动/触发。\n- 列2: 技能等级 - 当前等级1-10级。\n- 列3: 效果描述 - 当前等级下的具体效果说明。\n- 列4: 消耗类型 - 使用技能消耗的资源类型：体力/法力/无。\n- 列5: 消耗数值 - 使用一次消耗的资源量。\n- 列6: 当前熟练度 - 格式：当前熟练度/升至下级所需熟练度。\n\n技能获取规则：\n1. 初始技能：游戏开始时根据主角设定获得。\n2. 学习获得：满足条件时自动习得。\n3. 剧情获得：通过特定事件或训练获得。\n\n熟练度提升规则：\n1. 战斗结束时结算熟练度。\n2. 每次使用技能获得熟练度。\n3. 熟练度满后技能等级+1，效果增强。\n4. 技能等级上限为10级。",
+      "initNode": "游戏初始化时，根据设定为主角添加初始技能。",
+      "deleteNode": "技能因剧情被剥夺或替换时删除。",
+      "updateNode": "已有技能被升级时更新其等级和效果描述。",
+      "insertNode": "主角获得新的技能时添加。",
+      "ddl": "CREATE TABLE protagonist_skills ( -- 主角技能表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  skill_name TEXT, -- 技能名称\n  skill_type TEXT, -- 技能类型\n  skill_level INTEGER, -- 技能等级\n  effect_desc TEXT, -- 效果描述\n  cost_type TEXT, -- 消耗类型\n  cost_value INTEGER, -- 消耗数值\n  current_proficiency TEXT -- 当前熟练度\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "主角技能表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "主角技能表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      }
+    },
+    "orderNo": 3
+  },
+  "sheet_in05z9vz": {
+    "uid": "sheet_in05z9vz",
+    "name": "背包物品表",
+    "sourceData": {
+      "note": "记录主角拥有的所有物品、装备。\n- 列0: 物品名称 - 物品的名称。\n- 列1: 数量 - 拥有的数量。\n- 列2: 描述/效果 - 物品的功能或背景描述。\n- 列3: 类别 - 物品的类别（武器/防具/饰品/消耗品/材料/杂物）。\n- 列4: 装备部位 - 如果是装备，填写可装备的部位（头部/身体/左手/右手/腿部/饰品），非装备留空。\n- 列5: 属性加成 - 装备提供的属性加成，格式：力量+5,敏捷+3等，非装备留空。\n- 列6: 特殊效果 - 装备的特殊效果描述，非装备留空。\n\n装备类别说明：\n- 武器：可装备到左手或右手，双手武器需同时占用两个部位\n- 防具：可装备到头部、身体或腿部\n- 饰品：可装备到饰品槽位",
+      "initNode": "游戏初始化时，根据剧情与设定添加主角的初始携带物品。",
+      "deleteNode": "物品被完全消耗、丢弃或摧毁时删除。",
+      "updateNode": "获得已有的物品，使其数量增加时更新，已有物品状态变化时更新。",
+      "insertNode": "主角获得背包中没有的全新物品时添加。",
+      "ddl": "CREATE TABLE inventory ( -- 背包物品表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT, -- 物品名称\n  quantity INTEGER, -- 数量\n  desc_effect TEXT, -- 描述/效果\n  category TEXT, -- 类别\n  equip_slot TEXT, -- 装备部位\n  attribute_bonus TEXT, -- 属性加成\n  special_effect TEXT -- 特殊效果\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "背包物品表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "背包物品表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      }
+    },
+    "orderNo": 4
+  },
+  "sheet_etak47Ve": {
+    "uid": "sheet_etak47Ve",
+    "name": "任务与事件表",
+    "sourceData": {
+      "note": "记录所有当前正在进行的任务。\n- 列0: 任务名称 - 任务的标题。\n- 列1: 任务类型 - “主线任务”或“支线任务”。\n- 列2: 发布者 - 发布该任务的角色或势力。\n- 列3: 详细描述 - 任务的目标和要求。\n- 列4: 当前进度 - 对任务完成度的简要描述。\n- 列5: 任务时限 - 完成任务的剩余时间。\n- 列6: 奖励 - 完成任务可获得的奖励。\n- 列7: 惩罚 - 任务失败的后果。",
+      "initNode": "游戏初始化时，根据剧情与设定添加一条主线剧情。",
+      "deleteNode": "任务完成、失败或过期时删除。",
+      "updateNode": "任务取得关键进展时进行更新。",
+      "insertNode": "主角接取或触发新的主线或支线任务时添加。",
+      "ddl": "CREATE TABLE quests_events ( -- 任务与事件表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  quest_name TEXT, -- 任务名称\n  quest_type TEXT, -- 任务类型\n  publisher TEXT, -- 发布者\n  detailed_desc TEXT, -- 详细描述\n  current_progress TEXT, -- 当前进度\n  time_limit TEXT, -- 任务时限\n  reward TEXT, -- 奖励\n  penalty TEXT -- 惩罚\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "任务与事件表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "任务与事件表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      }
+    },
+    "orderNo": 5
+  },
+  "sheet_3NoMc1wI": {
+    "uid": "sheet_3NoMc1wI",
+    "name": "纪要表",
+    "sourceData": {
+      "note": "轮次日志，每轮交互后必须立即插入一条新记录。\n- 列0: 时间跨度 - 本轮事件发生的精确时间范围。\n- 列1: 地点 - 本轮事件发生的地点，从大到小描述。\n- 列2: 纪要 - 以第三方视角客观记录本轮事件，不得加入推测、情绪化语言、负面解读或主观判断。内容必须基于正文明确发生的事实，不得补充未出现的情节，不少于300字，结尾部分禁止进行总结或者升华。\n- 列3: 概要 - 30字以内，一句话概括纪要内容。\n- 列4: 编码索引 - 格式为 AMXX，XX从01递增。\n",
+      "initNode": "故事初始化时，插入一条新记录用于记录初始化剧情。",
+      "deleteNode": "禁止删除。",
+      "updateNode": "禁止操作。",
+      "insertNode": "每轮交互结束后插入一条新记录。",
+      "ddl": "CREATE TABLE chronicle ( -- 纪要表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  time_span TEXT, -- 时间跨度\n  location TEXT, -- 地点\n  summary_note TEXT, -- 纪要\n  overview TEXT, -- 概览\n  code_index TEXT -- 编码索引\n);"
+    },
+    "content": [
+      [
+        "row_id",
+        "时间跨度",
+        "地点",
+        "纪要",
+        "概览",
+        "编码索引"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1,
+      "groupId": -1
+    },
+    "exportConfig": {
+      "enabled": true,
+      "splitByRow": true,
+      "entryName": "纪要",
+      "entryType": "keyword",
+      "keywords": "编码索引",
+      "preventRecursion": true,
+      "injectionTemplate": "<记忆回溯>\n$1\n</记忆回溯>",
+      "extraIndexEnabled": true,
+      "extraIndexEntryName": "纪要索引",
+      "extraIndexColumns": [
+        "概览",
+        "编码索引"
+      ],
+      "extraIndexColumnModes": {
+        "概览": "index_only",
+        "编码索引": "both"
+      },
+      "extraIndexInjectionTemplate": "<已发生的事件概览>\n$1\n</已发生的事件概览>",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 999,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 1000,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 9999,
+        "order": 99987
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 9999,
+        "order": 99988
+      }
+    },
+    "orderNo": 6
+  },
+  "sheet_EquipmentHero": {
+    "uid": "sheet_EquipmentHero",
+    "name": "主角装备表",
+    "sourceData": {
+      "note": "记录主角当前装备的物品。\n- 列0: 装备名称 - 装备的名称。\n- 列1: 装备部位 - 头部/身体/手部/腿部/饰品。\n- 列2: 装备类型 - 武器/防具/饰品。\n- 列3: 属性加成 - 装备提供的属性加成描述。\n- 列4: 特殊效果 - 装备的特殊效果描述。\n\n装备部位限制：\n- 头部：最多1件\n- 身体：最多1件\n- 手部：最多2件（双手武器占用2个位置）\n- 腿部：最多1件\n- 饰品：最多2件",
+      "initNode": "游戏初始化时，根据主角设定添加初始装备。",
+      "deleteNode": "装备被卸下或替换时删除。",
+      "updateNode": "装备属性变化时更新。",
+      "insertNode": "主角装备新物品时添加。",
+      "ddl": "CREATE TABLE protagonist_equipment ( -- 主角装备表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  equip_name TEXT, -- 装备名称\n  equip_slot TEXT, -- 装备部位\n  equip_type TEXT, -- 装备类型\n  attribute_bonus TEXT, -- 属性加成\n  special_effect TEXT -- 特殊效果\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "主角装备表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "主角装备表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      }
+    },
+    "orderNo": 7
+  },
+  "sheet_BattleScene": {
+    "uid": "sheet_BattleScene",
+    "name": "战斗场景表",
+    "sourceData": {
+      "note": "【战斗场景专用表】仅在战斗进行时启用。战斗结束后清空。\n此表必须客观记录正文中发生的战斗结果，不得擅自编造或推测战斗过程。\n\n- 列0: 角色名称 - 参战角色名称，敌方杂兵使用通用名称如哥布林A、哥布林B。\n- 列1: 阵营 - 主角方/敌方/中立。\n- 列2: 职业 - 角色职业。\n- 列3: 当前等级 - 角色当前等级。\n- 列4: 力量 - 力量属性值。\n- 列5: 敏捷 - 敏捷属性值。\n- 列6: 体质 - 体质属性值。\n- 列7: 智力 - 智力属性值。\n- 列8: 感知 - 感知属性值。\n- 列9: 魅力 - 魅力属性值。\n- 列10: 生命值 - 格式：当前值/最大值，降为0表示战败。\n- 列11: 体力值 - 格式：当前值/最大值。\n- 列12: 法力值 - 格式：当前值/最大值。\n- 列13: 可用技能 - 当前可使用的技能列表。\n- 列14: 当前状态 - 正常/眩晕/中毒/束缚/沉默等负面状态。\n- 列15: 角色类型 - 重要人物/杂兵，杂兵战斗结束后不录入重要人物表。\n\n重要规则：\n1. 战斗开始时，根据正文分析录入所有参战角色。\n2. 必须客观记录正文中实际发生的战斗结果。\n3. 战斗结束时清空全表。\n4. 战斗结束后，重要人物的状态同步到重要角色表。\n5. 杂兵类角色数据不录入重要人物表。",
+      "initNode": "战斗开始时，根据正文分析录入所有参战角色。",
+      "deleteNode": "战斗结束时清空全表。",
+      "updateNode": "根据正文战况客观更新角色状态。",
+      "insertNode": "战斗中有新角色加入时添加。",
+      "ddl": "CREATE TABLE battle_scene ( -- 战斗场景表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  character_name TEXT, -- 角色名称\n  faction TEXT, -- 阵营\n  profession TEXT, -- 职业\n  current_level INTEGER, -- 当前等级\n  strength INTEGER, -- 力量\n  agility INTEGER, -- 敏捷\n  constitution INTEGER, -- 体质\n  intelligence INTEGER, -- 智力\n  perception INTEGER, -- 感知\n  charisma INTEGER, -- 魅力\n  hp TEXT, -- 生命值\n  stamina TEXT, -- 体力值\n  mp TEXT, -- 法力值\n  available_skills TEXT, -- 可用技能\n  current_status TEXT, -- 当前状态\n  character_type TEXT -- 角色类型\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "战斗场景表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "战斗场景表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      }
+    },
+    "orderNo": 8
+  },
+  "sheet_SystemRules": {
+    "uid": "sheet_SystemRules",
+    "name": "系统规则表",
+    "sourceData": {
+      "note": "存储所有数值计算规则，作为AI参考的常量表。此表有且仅有多行规则记录。\n\n六维属性规则：\n- 六维属性：力量/敏捷/体质/智力/感知/魅力\n- 力量：影响物理伤害、负重能力、体力上限\n- 敏捷：影响行动速度、闪避率、命中率\n- 体质：影响生命值上限、体力上限、恢复速度\n- 智力：影响法力值上限、技能效果、学习能力\n- 感知：影响命中率、侦查能力、反应速度\n- 魅力：影响社交效果、某些技能效果、NPC好感度\n\n初始属性分配：\n- 初始六维总值：36点（每项平均6点）\n- 职业会影响初始属性分布\n- 单项属性最低1点，最高10点（初始）\n\n升级所需经验公式：\n- 所需经验 = 基础值(100) × 等级系数(1.5^目标等级)\n- 等级1→2需要150经验，2→3需要225经验，3→4需要338经验\n- 等级上限：99级\n\n主角升级奖励：\n- 主角每次升级获得3点自由属性点数\n- 自由点数由外部插件分配到六维属性\n- 升级后生命/体力/法力恢复至新的最大值\n\nNPC自动加点：\n- NPC升级后由系统自动加点\n- 根据职业倾向优先提升相关属性\n- 例如：战士优先力量和体质，法师优先智力和感知\n- 升级后生命/体力/法力恢复至新的最大值\n\n资源最大值公式（基础值）：\n- 生命值上限 = 体质 × 10 + 50\n- 体力值上限 = 体质 × 5 + 力量 × 3 + 20\n- 法力值上限 = 智力 × 8 + 20\n\n自然恢复机制：\n- 基于游戏内时间恢复\n- 每30分钟恢复5%最大值\n- 生命/体力/法力同时恢复\n- 战斗中不触发自然恢复\n- 负面状态可能阻止恢复\n\n熟练度规则：\n- 战斗结束时结算熟练度\n- 每次使用技能获得10点熟练度\n- 技能升级所需熟练度 = 当前等级 × 50\n- 1→2级需要50，2→3级需要100\n- 技能等级上限10级\n- 技能升级时效果增强约15%\n\n战斗结束处理：\n1. 计算并分配经验值给主角和参战NPC\n2. 结算所有使用技能的熟练度\n3. 将战斗表中重要人物的状态同步到重要角色表\n4. 杂兵类角色数据丢弃，不录入\n5. 清空战斗场景表",
+      "initNode": "游戏初始化时，插入系统规则说明。",
+      "deleteNode": "禁止删除。",
+      "updateNode": "禁止操作。",
+      "insertNode": "禁止操作。",
+      "ddl": "CREATE TABLE system_rules ( -- 系统规则表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  rule_category TEXT, -- 规则类别\n  rule_name TEXT, -- 规则名称\n  rule_description TEXT -- 规则描述\n);"
+    },
+    "content": [
+      [
+        "row_id",
+        "规则类别",
+        "规则名称",
+        "规则描述"
+      ],
+      [
+        null,
+        "六维属性",
+        "属性说明",
+        "力量：影响物理伤害、负重能力、体力上限；敏捷：影响行动速度、闪避率、命中率；体质：影响生命值上限、体力上限、恢复速度；智力：影响法力值上限、技能效果、学习能力；感知：影响命中率、侦查能力、反应速度；魅力：影响社交效果、某些技能效果、NPC好感度"
+      ],
+      [
+        null,
+        "六维属性",
+        "初始属性分配",
+        "初始六维总值：36点（每项平均6点）；职业会影响初始属性分布；单项属性最低1点，最高10点（初始）"
+      ],
+      [
+        null,
+        "升级",
+        "升级所需经验公式",
+        "所需经验 = 基础值(100) × 等级系数(1.5^目标等级)；等级1→2需要150经验，2→3需要225经验，3→4需要338经验；等级上限：99级"
+      ],
+      [
+        null,
+        "升级",
+        "主角升级奖励",
+        "主角每次升级获得3点自由属性点数；自由点数由外部插件分配到六维属性；升级后生命/体力/法力恢复至新的最大值"
+      ],
+      [
+        null,
+        "升级",
+        "NPC自动加点",
+        "NPC升级后也是有3点自由点数，由系统自动加点；根据职业倾向优先提升相关属性；例如：战士优先力量和体质，法师优先智力和感知；升级后生命/体力/法力恢复至新的最大值"
+      ],
+      [
+        null,
+        "NPC属性构建",
+        "NPC属性初始化",
+        "NPC在生成时，需要根据等级来初始化属性，计算公式为30点初始属性+等级X每级3点的自由属性，具体分配根据职业和设定决定"
+      ],
+      [
+        null,
+        "资源计算",
+        "资源最大值公式",
+        "生命值上限 = 体质 × 10 + 50；体力值上限 = 体质 × 5 + 力量 × 3 + 20；法力值上限 = 智力 × 8 + 20"
+      ],
+      [
+        null,
+        "资源恢复",
+        "自然恢复机制",
+        "基于游戏内时间恢复；每30分钟恢复5%最大值；生命/体力/法力同时恢复；战斗中不触发自然恢复；负面状态可能阻止恢复"
+      ],
+      [
+        null,
+        "熟练度",
+        "熟练度获取与升级",
+        "战斗结束时结算熟练度；每次使用技能获得10点熟练度；技能升级所需熟练度 = 当前等级 × 50；1→2级需要50，2→3级需要100；技能等级上限10级；技能升级时效果增强约15%"
+      ],
+      [
+        null,
+        "战斗结算",
+        "战斗结束处理",
+        "计算并分配经验值给主角和参战NPC；结算所有使用技能的熟练度；将战斗表中重要人物的状态同步到重要角色表；杂兵类角色数据丢弃，不录入；清空战斗场景表"
+      ],
+      [
+        null,
+        "NPC离场",
+        "NPC离场处理",
+        "当重要人物表里的角色离开主角视线时，应当将人物是否离场更新为是，再次登场时更新为否，每轮都需要检查。"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "系统规则表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "系统规则表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      },
+      "injectIntoWorldbook": false
+    },
+    "orderNo": 9
+  },
+  "sheet_OptionsNew": {
+    "uid": "sheet_OptionsNew",
+    "name": "选项表",
+    "sourceData": {
+      "note": "记录每轮主角可以进行的动作选项。此表有且仅有一行。\n- 列0: 选项一 – 以第三人称描述主角可采取的合理行动，偏向策略或推进剧情。\n- 列1: 选项二 – 以第三人称描述主角可采取的中立行动，不偏向任何立场。\n- 列2: 选项三 – 以第三人称描述主角可采取的善意行动，体现帮助、保护或安抚。\n- 列3: 选项四 – 以第三人称描述主角可采取的 NSFW 相关行动，但必须符合剧情逻辑，不得代替主角说话。\n所有选项必须使用第三人称（如“主角尝试…”，“主角决定…”），不得代替主角发言；必须紧扣当前剧情；四个选项需风格明确、互不重复。",
+      "initNode": "游戏初始化时，生成四个初始选项。",
+      "deleteNode": "禁止删除。",
+      "updateNode": "每轮交互后必须更新此表，根据当前剧情生成新的四个选项覆盖原有内容。",
+      "insertNode": "禁止操作。",
+      "ddl": "CREATE TABLE options ( -- 选项表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  option_1 TEXT, -- 选项一\n  option_2 TEXT, -- 选项二\n  option_3 TEXT, -- 选项三\n  option_4 TEXT -- 选项四\n);"
+    },
+    "content": [
+      [
+        "row_id"
+      ]
+    ],
+    "updateConfig": {
+      "uiSentinel": -1,
+      "contextDepth": -1,
+      "updateFrequency": -1,
+      "batchSize": -1,
+      "skipFloors": -1
+    },
+    "exportConfig": {
+      "enabled": false,
+      "splitByRow": false,
+      "entryName": "选项表",
+      "entryType": "constant",
+      "keywords": "",
+      "preventRecursion": true,
+      "injectionTemplate": "",
+      "extraIndexEnabled": false,
+      "extraIndexEntryName": "选项表-索引",
+      "extraIndexColumns": [],
+      "extraIndexColumnModes": {},
+      "extraIndexInjectionTemplate": "",
+      "entryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10000
+      },
+      "extraIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 10010
+      },
+      "fixedEntryPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99990
+      },
+      "fixedIndexPlacement": {
+        "position": "at_depth_as_system",
+        "depth": 2,
+        "order": 99991
+      },
+      "injectIntoWorldbook": false
+    },
+    "orderNo": 10
+  },
+  "mate": {
+    "type": "chatSheets",
+    "version": 1,
+    "updateConfigUiSentinel": -1,
+    "globalInjectionConfig": {
+      "readableEntryPlacement": {
+        "position": "before_character_definition",
+        "depth": 2,
+        "order": 99981
+      },
+      "wrapperPlacement": {
+        "position": "before_character_definition",
+        "depth": 2,
+        "order": 99980
+      }
+    }
+  }
+}

@@ -198,6 +198,18 @@ export interface AutoUpdateResult {
 }
 
 /**
+ * 自动更新进度事件（用于 UI 展示）
+ */
+export interface AutoUpdateProgressEvent {
+    /** 总组数 */
+    totalGroups: number;
+    /** 当前阶段 */
+    phase: 'preparing' | 'calling_ai' | 'merging' | 'applying' | 'saving' | 'complete' | 'error';
+    /** 可选消息 */
+    message?: string;
+}
+
+/**
  * 自动更新计划的业务操作委托接口
  * 只包含纯业务操作（数据处理），不包含 UI 操作（toast/状态显示）
  */
@@ -208,6 +220,7 @@ export interface AutoUpdateOperations {
     purgeOldLayerData: () => Promise<void>;
 }
 
+
 /**
  * 执行自动更新计划（新架构：合并前置）
  */
@@ -216,6 +229,7 @@ export async function executeAutoUpdatePlan_ACU(
     settings: any,
     setAutoUpdating: (v: boolean) => void,
     ops: AutoUpdateOperations,
+    onProgress?: (event: AutoUpdateProgressEvent) => void,
 ): Promise<AutoUpdateResult> {
     const { tablesToUpdate, updateGroups } = plan;
     const groupKeys = Object.keys(updateGroups);
@@ -233,9 +247,11 @@ export async function executeAutoUpdatePlan_ACU(
     try {
         // ═══ Task 4: 合并前置架构 ═══
         // 阶段1: 按 chunk 并发准备 AI 请求（所有组）
+        onProgress?.({ totalGroups, phase: 'preparing', message: `准备 ${totalGroups} 组 AI 请求...` });
         const allPreparedCalls: any[] = [];
         for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
             const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
+            onProgress?.({ totalGroups, phase: 'preparing', message: `准备第 ${Math.floor(start / maxConcurrentGroups) + 1}/${Math.ceil(groupKeys.length / maxConcurrentGroups)} 批 AI 请求...` });
             for (const gKey of chunkKeys) {
                 const group = updateGroups[gKey];
                 const prepareResult = await ops.processUpdates(group.indices, 'auto_independent', {
@@ -256,12 +272,15 @@ export async function executeAutoUpdatePlan_ACU(
 
         if (failedGroupKeys.length === 0 && allPreparedCalls.length > 0) {
             // 阶段2: 并发 AI 生成
+            onProgress?.({ totalGroups, phase: 'calling_ai', message: `正在调用 AI 生成 ${allPreparedCalls.length} 组更新...` });
             const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(allPreparedCalls, undefined);
             if (!generationResult.success) {
                 logWarn_ACU(`[Auto] AI 生成失败: ${generationResult.error}`);
+                onProgress?.({ totalGroups, phase: 'error', message: `AI 生成失败: ${generationResult.error}` });
                 failedGroupKeys.push('__generation_failed__');
             } else {
                 // 阶段3: 提取并合并所有编辑内容
+                onProgress?.({ totalGroups, phase: 'merging', message: `正在合并 ${generationResult.responses.length} 组 AI 编辑结果...` });
                 const allEditBlocks: string[] = [];
                 for (const resp of generationResult.responses) {
                     const edits = extractEditsFromAiResponse_ACU(resp.aiResponse);
@@ -284,11 +303,14 @@ export async function executeAutoUpdatePlan_ACU(
                     logDebug_ACU(`[Auto] 合并 ${allEditBlocks.length} 个编辑块，执行 applyMergedEdits...`);
 
                     // 阶段4: 单次执行合并编辑
+                    onProgress?.({ totalGroups, phase: 'applying', message: '正在执行合并编辑...' });
                     const applyResult = await applyMergedEdits_ACU(mergedEdits, 'auto', allSheetKeys);
                     if (!applyResult.success) {
                         failedGroupKeys.push('__apply_failed__');
+                        onProgress?.({ totalGroups, phase: 'error', message: '合并编辑执行失败' });
                     } else {
                         // 阶段5: 单次持久化（保存到最远楼层）
+                        onProgress?.({ totalGroups, phase: 'saving', message: '正在保存更新到聊天记录...' });
                         let primarySaveTargetIndex = -1;
                         for (const key of groupKeys) {
                             const group = updateGroups[key];
@@ -312,6 +334,10 @@ export async function executeAutoUpdatePlan_ACU(
                     }
                 }
             }
+        }
+        // 阶段全部成功完成
+        if (failedGroupKeys.length === 0) {
+            onProgress?.({ totalGroups, phase: 'complete', message: `${totalGroups} 组自动更新全部完成！` });
         }
     } finally {
         setAutoUpdating(false);

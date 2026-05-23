@@ -105,7 +105,7 @@ export function getHostWindow(): Window {
 export function checkAndMarkInstance(): boolean {
     const hostWin = getHostWindow() as any;
     if (hostWin[ACU_INSTANCE_FLAG]) {
-        console.warn('[SP·数据库 III] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
+        console.warn('[SP·数据库 IV] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
         return true; // 已有实例
     }
     hostWin[ACU_INSTANCE_FLAG] = true;

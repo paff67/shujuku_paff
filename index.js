@@ -101,7 +101,7 @@
     function checkAndMarkInstance() {
         const hostWin = getHostWindow();
         if (hostWin[ACU_INSTANCE_FLAG]) {
-            console.warn('[SP·数据库 III] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
+            console.warn('[SP·数据库 IV] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
             return true; // 已有实例
         }
         hostWin[ACU_INSTANCE_FLAG] = true;
@@ -33151,7 +33151,7 @@ $CONTENT
     /**
      * 执行自动更新计划（新架构：合并前置）
      */
-    async function executeAutoUpdatePlan_ACU(plan, settings, setAutoUpdating, ops) {
+    async function executeAutoUpdatePlan_ACU(plan, settings, setAutoUpdating, ops, onProgress) {
         const { tablesToUpdate, updateGroups } = plan;
         const groupKeys = Object.keys(updateGroups);
         if (groupKeys.length === 0) {
@@ -33165,9 +33165,11 @@ $CONTENT
         try {
             // ═══ Task 4: 合并前置架构 ═══
             // 阶段1: 按 chunk 并发准备 AI 请求（所有组）
+            onProgress?.({ totalGroups, phase: 'preparing', message: `准备 ${totalGroups} 组 AI 请求...` });
             const allPreparedCalls = [];
             for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
                 const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
+                onProgress?.({ totalGroups, phase: 'preparing', message: `准备第 ${Math.floor(start / maxConcurrentGroups) + 1}/${Math.ceil(groupKeys.length / maxConcurrentGroups)} 批 AI 请求...` });
                 for (const gKey of chunkKeys) {
                     const group = updateGroups[gKey];
                     const prepareResult = await ops.processUpdates(group.indices, 'auto_independent', {
@@ -33189,13 +33191,16 @@ $CONTENT
             }
             if (failedGroupKeys.length === 0 && allPreparedCalls.length > 0) {
                 // 阶段2: 并发 AI 生成
+                onProgress?.({ totalGroups, phase: 'calling_ai', message: `正在调用 AI 生成 ${allPreparedCalls.length} 组更新...` });
                 const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(allPreparedCalls, undefined);
                 if (!generationResult.success) {
                     logWarn_ACU(`[Auto] AI 生成失败: ${generationResult.error}`);
+                    onProgress?.({ totalGroups, phase: 'error', message: `AI 生成失败: ${generationResult.error}` });
                     failedGroupKeys.push('__generation_failed__');
                 }
                 else {
                     // 阶段3: 提取并合并所有编辑内容
+                    onProgress?.({ totalGroups, phase: 'merging', message: `正在合并 ${generationResult.responses.length} 组 AI 编辑结果...` });
                     const allEditBlocks = [];
                     for (const resp of generationResult.responses) {
                         const edits = extractEditsFromAiResponse_ACU(resp.aiResponse);
@@ -33217,12 +33222,15 @@ $CONTENT
                         const mergedEdits = mergeAiEditContents_ACU(allEditBlocks);
                         logDebug_ACU(`[Auto] 合并 ${allEditBlocks.length} 个编辑块，执行 applyMergedEdits...`);
                         // 阶段4: 单次执行合并编辑
+                        onProgress?.({ totalGroups, phase: 'applying', message: '正在执行合并编辑...' });
                         const applyResult = await applyMergedEdits_ACU(mergedEdits, 'auto', allSheetKeys);
                         if (!applyResult.success) {
                             failedGroupKeys.push('__apply_failed__');
+                            onProgress?.({ totalGroups, phase: 'error', message: '合并编辑执行失败' });
                         }
                         else {
                             // 阶段5: 单次持久化（保存到最远楼层）
+                            onProgress?.({ totalGroups, phase: 'saving', message: '正在保存更新到聊天记录...' });
                             let primarySaveTargetIndex = -1;
                             for (const key of groupKeys) {
                                 const group = updateGroups[key];
@@ -33247,6 +33255,10 @@ $CONTENT
                         }
                     }
                 }
+            }
+            // 阶段全部成功完成
+            if (failedGroupKeys.length === 0) {
+                onProgress?.({ totalGroups, phase: 'complete', message: `${totalGroups} 组自动更新全部完成！` });
             }
         }
         finally {
@@ -33345,22 +33357,69 @@ $CONTENT
         const plan = buildAutoUpdatePlan_ACU(liveChat, currentJsonTableData_ACU, settings_ACU, triggerIsolationKey);
         if (plan.tablesToUpdate.length === 0)
             return;
-        // UI：显示开始 toast
         const totalGroups = Object.keys(plan.updateGroups).length;
-        const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
-        if (totalGroups > maxConcurrentGroups) {
-            showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
+        // UI：创建与手动填表一致的进度 toast（带停止按钮）
+        const autoStopButtonId = `acu-stop-auto-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const autoStopButtonHtml = renderStopButton_ACU(autoStopButtonId, '终止');
+        const autoInitialMessage = `正在准备自动填表（${totalGroups} 组）...`;
+        const autoToastMessage = `<div><span class="acu-toast-progress-message">${autoInitialMessage}</span>${autoStopButtonHtml}</div>`;
+        let autoLoadingToast = null;
+        try {
+            if (typeof toastr_API_ACU !== 'undefined') {
+                try {
+                    topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableFillStart();
+                }
+                catch (_) { }
+                autoLoadingToast = showToastr_ACU('info', autoToastMessage, {
+                    timeOut: 0,
+                    extendedTimeOut: 0,
+                    tapToDismiss: false,
+                    acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+                    onShown: function () {
+                        if (typeof bindTableFillStopButton_ACU === 'function') {
+                            bindTableFillStopButton_ACU(autoStopButtonId, () => {
+                                _set_isAutoUpdatingCard_ACU(false);
+                                abortAllActiveRequests_ACU$1();
+                                if ($statusMessageSpan_ACU)
+                                    $statusMessageSpan_ACU.text('自动填表已终止...');
+                                if (autoLoadingToast)
+                                    autoLoadingToast.find('.acu-toast-progress-message').text('自动填表已终止...');
+                                showToastr_ACU('warning', '自动填表任务已由用户终止。');
+                            });
+                        }
+                    },
+                });
+            }
         }
-        else {
-            showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
-        }
+        catch (_) { /* toast 创建失败不阻断业务 */ }
+        // 构建自动进度回调（与手动填表进度更新逻辑一致）
+        const autoOnProgress = (event) => {
+            const phaseMessages = {
+                'preparing': `正在准备自动填表（${event.totalGroups} 组）...`,
+                'calling_ai': `正在调用 AI 生成更新...`,
+                'merging': `正在合并 AI 编辑结果...`,
+                'applying': `正在执行合并编辑...`,
+                'saving': `正在保存更新到聊天记录...`,
+                'complete': `${event.totalGroups} 组自动更新完成！`,
+                'error': `更新出错：${event.message || '未知错误'}`,
+            };
+            const msg = phaseMessages[event.phase] || event.message || '正在处理...';
+            if ($statusMessageSpan_ACU)
+                $statusMessageSpan_ACU.text(msg);
+            if (autoLoadingToast)
+                autoLoadingToast.find('.acu-toast-progress-message').text(msg);
+        };
         // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
         const result = await executeAutoUpdatePlan_ACU(plan, settings_ACU, _set_isAutoUpdatingCard_ACU, {
             processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, options),
             refreshData: () => refreshMergedDataAndNotifyWithUI_ACU(),
             loadAllChatMessages: () => loadAllChatMessages_ACU(),
             purgeOldLayerData: () => purgeOldLayerData_ACU(),
-        });
+        }, autoOnProgress);
+        // 清除进度 toast
+        if (autoLoadingToast && toastr_API_ACU) {
+            toastr_API_ACU.clear(autoLoadingToast);
+        }
         // UI：根据返回值显示结果
         if (result.failedGroups > 0) {
             showToastr_ACU('warning', `并发分组更新有 ${result.failedGroups} 组失败，请查看日志。`);
@@ -48751,7 +48810,7 @@ $CONTENT
         const windowId = `${SCRIPT_ID_PREFIX_ACU}-main-window`;
         createACUWindow({
             id: windowId,
-            title: 'SP·数据库 III',
+            title: 'SP·数据库 IV',
             content: popupHtml,
             width: 1400, // 基础宽度
             height: 900, // 基础高度
@@ -48832,7 +48891,7 @@ $CONTENT
             return true;
         }
         $menuItemContainer = jQuery_API_ACU(`<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`);
-        const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 III</span></div>`;
+        const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 IV</span></div>`;
         const $menuItem = jQuery_API_ACU(menuItemHTML);
         $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
             e.stopPropagation();
@@ -55186,7 +55245,7 @@ $CONTENT
     $(function () {
         // 互斥检测：如果已有实例（插件或另一个油猴脚本）在运行，跳过初始化
         if (checkAndMarkInstance()) {
-            console.warn('[SP·数据库 III] 油猴脚本检测到已有实例运行，跳过初始化。');
+            console.warn('[SP·数据库 IV] 油猴脚本检测到已有实例运行，跳过初始化。');
             return;
         }
         console.log('ACU_INIT_DEBUG: Document is ready, attempting to initialize ACU script (Userscript mode).');
