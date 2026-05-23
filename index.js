@@ -50946,6 +50946,18 @@ $CONTENT
                                 newRow[colIndex] = normalizedData[colName];
                             }
                         }
+                        // 原生模式自动补 row_id：当第一列是 row_id 且调用者未提供时，
+                        // 扫描现有行取最大数值 row_id + 1，确保 delta 机制不会跳过该行
+                        const firstHeader = headers[0];
+                        if (firstHeader === 'row_id' && (!newRow[0] || String(newRow[0]).trim() === '')) {
+                            let maxId = 0;
+                            for (let i = 1; i < targetSheet.content.length; i++) {
+                                const num = Number(targetSheet.content[i]?.[0]);
+                                if (!isNaN(num) && num > maxId)
+                                    maxId = num;
+                            }
+                            newRow[0] = String(maxId + 1);
+                        }
                         targetSheet.content.push(newRow);
                         const newIndex = targetSheet.content.length - 1;
                         logDebug_ACU(`insertRow: Inserted row at index ${newIndex} in [${tableName}]`);
