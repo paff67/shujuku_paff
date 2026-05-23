@@ -11,6 +11,7 @@
 import { TABLE_TEMPLATE_ACU } from './defaults-json.js';
 import { DEBUG_MODE_ACU, SCRIPT_ID_PREFIX_ACU, TABLE_ORDER_FIELD_ACU } from './constants';
 import { safeJsonParse_ACU } from './json-helpers';
+import { parseDDLColumnComments, parseDDLColumnNames } from './ddl-utils';
 import { pushLog, isDebugLogEnabled } from './log-buffer';
 
 export function cleanChatName_ACU(fileName: string): string {
@@ -224,8 +225,19 @@ export   function stripSeedRowsFromTemplate_ACU(templateObj: any) {
       Object.keys(templateObj).forEach(k => {
           if (!k.startsWith('sheet_')) return;
           const table = templateObj[k];
-          if (!table || !Array.isArray(table.content) || table.content.length === 0) return;
-          const headerRow = table.content[0];
+          if (!table) return;
+          let headerRow = Array.isArray(table.content) && table.content.length > 0 ? table.content[0] : null;
+          // content[0] 缺失或为空数组 → 从 sourceData.ddl 推导表头
+          if (!Array.isArray(headerRow) || headerRow.length === 0) {
+              const ddl = table.sourceData?.ddl;
+              if (ddl && typeof ddl === 'string') {
+                  try {
+                      const comments = parseDDLColumnComments(ddl);
+                      headerRow = parseDDLColumnNames(ddl).map(sqlName => comments.get(sqlName) || sqlName);
+                  } catch (_) { headerRow = null; }
+              }
+          }
+          if (!headerRow) headerRow = ['row_id'];
           // 仅保留表头行，移除所有数据行（包括模板自带的示例/预置数据）
           table.content = [headerRow];
       });
@@ -312,6 +324,24 @@ export   function parseTableTemplateJson_ACU({ stripSeedRows = false } = {}) {
               logError_ACU('[模板解析] 所有解析方案均失败，模板长度:', cleanTemplate.length, '首字符:', JSON.stringify(cleanTemplate[0]));
               return null;
           }
+
+          // [统一补齐] 第三方/导入模板的 sheet.content 可能是 [[]]（空表头行）
+          // 在所有消费方拿到模板对象之前，统一从 sourceData.ddl 推导中文表头
+          const _sheetKeys = Object.keys(obj).filter(k => k.startsWith('sheet_'));
+          for (const _sk of _sheetKeys) {
+              const _sheet = obj[_sk];
+              if (_sheet
+                  && (!Array.isArray(_sheet.content) || _sheet.content.length === 0
+                      || !Array.isArray(_sheet.content[0]) || _sheet.content[0].length === 0)
+                  && _sheet.sourceData?.ddl && typeof _sheet.sourceData.ddl === 'string') {
+                  try {
+                      const _comments = parseDDLColumnComments(_sheet.sourceData.ddl);
+                      _sheet.content = [parseDDLColumnNames(_sheet.sourceData.ddl).map(sqlName => _comments.get(sqlName) || sqlName)];
+                      logDebug_ACU('[模板解析] sheet', _sk, 'content表头为空，已从DDL推导补齐，列数:', _sheet.content[0].length);
+                  } catch (_) { /* DDL 解析失败，保持原样 */ }
+              }
+          }
+
           return stripSeedRows ? stripSeedRowsFromTemplate_ACU(obj) : obj;
       } catch (e) {
           logError_ACU('[模板解析] 解析异常:', e);

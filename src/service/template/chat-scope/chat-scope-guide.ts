@@ -1,4 +1,4 @@
-/**
+﻿/**
  * service/template/chat-scope/chat-scope-guide.ts
  * Sheet Guide 数据操作（D 组）
  */
@@ -8,6 +8,7 @@ import { DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU, deriveTemplatePresetNameForIm
 import { CHAT_SCOPED_CONFIG_FIELD_ACU, CHAT_SHEET_GUIDE_FIELD_ACU, CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU, CHAT_SHEET_GUIDE_VERSION_ACU, CHAT_TEMPLATE_ARCHIVE_OPTION_PREFIX_ACU, LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU, MAX_CHAT_TEMPLATE_ARCHIVES_PER_TAG_ACU, getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, normalizeChatScopedConfigContainer_ACU } from '../../../data/storage/chat-history';
 import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../template-preset-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../../runtime/state-manager';
+import { parseDDLColumnComments, parseDDLColumnNames } from '../../../shared/ddl-utils';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../data/gateways/chat-gateway';
 import { TABLE_ORDER_FIELD_ACU } from '../../../shared/constants';
 import { applyTemplateScopeForCurrentChat_ACU } from '../../settings/settings-service';
@@ -18,7 +19,7 @@ import { applySheetOrderNumbers_ACU, cloneScopedConfigData_ACU, ensureSheetOrder
 import { getTemplatePresetDisplayName_ACU, persistTemplateScopeSelectionState_ACU, upsertTemplatePreset_ACU } from '../template-preset-service';
 import { formatPlotScopeUpdatedAt_ACU } from '../../../shared/utils';
 import { ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU } from '../../worldbook/injection-engine';
-import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, isLegacyMatchForIsolation_ACU } from '../../../data/repositories/chat-message-data-repo';
+import { readIsolatedTagData_ACU } from '../../../data/repositories/chat-message-data-repo';
 import { normalizeChatScopedConfigSource_ACU, normalizeGuideData_ACU } from './chat-scope-base';
 // 循环 import — 运行时安全
 import { normalizeTemplateScopeMode_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeTemplateSnapshotForChat_ACU, getCurrentChatTemplateScopeState_ACU, setCurrentChatTemplateScopeState_ACU, buildChatTemplateScopeStateFromCurrent_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, upsertChatTemplatePresetEntry_ACU, normalizeChatTemplateScopeState_ACU } from './chat-scope-template';
@@ -31,7 +32,18 @@ import { getSortedSheetKeys_ACU } from './chat-scope-sheet';
       Object.keys(normalized).forEach((k: string) => {
           if (!k.startsWith('sheet_')) return;
           const s = normalized[k];
-          const headerRow = Array.isArray(s?.content?.[0]) ? JSON.parse(JSON.stringify(s.content[0])) : ["row_id"];
+          let headerRow = Array.isArray(s?.content?.[0]) ? JSON.parse(JSON.stringify(s.content[0])) : null;
+          // [防御] 表头为空数组或全空时，从 DDL 推导列名和中文注释
+          if (!headerRow || headerRow.length === 0 || headerRow.every((v: any) => v === null || v === undefined || String(v ?? '').trim() === '')) {
+              const ddl = s?.sourceData?.ddl;
+              if (ddl && typeof ddl === 'string') {
+                  try {
+                      const comments = parseDDLColumnComments(ddl);
+                      headerRow = parseDDLColumnNames(ddl).map(sqlName => comments.get(sqlName) || sqlName);
+                  } catch (_) { headerRow = null; }
+              }
+          }
+          if (!headerRow || headerRow.length === 0) headerRow = ['row_id'];
           const next = JSON.parse(JSON.stringify(s));
           // content: header + (可选) seedRows
           const seedRows = includeSeedRows && Array.isArray(s?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])
@@ -107,18 +119,9 @@ import { getSortedSheetKeys_ACU } from './chat-scope-sheet';
           const message = chat[i];
           if (!message || message.is_user) continue;
 
-          const isolatedTagData = readIsolatedTagData_ACU(message, normalizedKey);
-          appendTables(isolatedTagData?.independentData);
-
-          const isLegacyMatch = isLegacyMatchForIsolation_ACU(message, {
-              enabled: settings_ACU.dataIsolationEnabled,
-              code: settings_ACU.dataIsolationCode,
-          });
-          if (!isLegacyMatch) continue;
-
-          appendTables(readLegacyIndependentData_ACU(message));
-          appendTables(readLegacyStandardData_ACU(message), { summaryOnly: false });
-          appendTables(readLegacySummaryData_ACU(message), { summaryOnly: true });
+          // ── 只从 V2 隔离数据读取，不再扫描旧格式 ──
+          const tagData = readIsolatedTagData_ACU(message, normalizedKey);
+          appendTables(tagData?.independentData);
       }
 
       if (encounteredKeys.length === 0) return null;
@@ -559,7 +562,18 @@ import { getSortedSheetKeys_ACU } from './chat-scope-sheet';
           const base = JSON.parse(JSON.stringify(templateObj[k] || {}));
           base.uid = base.uid || k;
           base.name = base.name || k;
-          if (!Array.isArray(base.content) || base.content.length === 0) base.content = [["row_id"]];
+          if (!Array.isArray(base.content) || base.content.length === 0 || !Array.isArray(base.content[0]) || base.content[0].length === 0) {
+              // content[0] 缺失或为空 → 尝试从 sourceData.ddl 推导中文表头行
+              const ddl = base.sourceData?.ddl;
+              if (ddl && typeof ddl === 'string') {
+                  try {
+                      const comments = parseDDLColumnComments(ddl);
+                      base.content = [parseDDLColumnNames(ddl).map(sqlName => comments.get(sqlName) || sqlName)];
+                  } catch (_) { base.content = [["row_id"]]; }
+              } else {
+                  base.content = [["row_id"]];
+              }
+          }
           // v2: 保存模板预置数据为 seedRows，但指导表本体 content 仍只保留表头
           if (Array.isArray(base.content) && base.content.length > 1) {
               base[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(base.content.slice(1)));

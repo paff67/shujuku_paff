@@ -10,7 +10,7 @@ import {
 } from '../../data/repositories/chat-message-data-repo';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
-import { clearCurrentIsolationLegacyTableSnapshots_ACU, readTablePersistenceLayerV2_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
+import { readTablePersistenceLayerV2_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
 import type { TableCheckpointV2_ACU, TablePersistenceLayerV2_ACU } from './table-delta-types';
 import {
   getTablePersistenceDeltasV2_ACU,
@@ -152,6 +152,28 @@ export function buildLegacyCheckpointFromChat_ACU(
 
   const { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex } = scanResult;
 
+  // ── D1: migrateContentNullToRowId — 确保 checkpoint 数据格式与 SQL DDL 兼容 ──
+  // 旧快照中可能存在 content[0][0] === null 的格式，需要迁移为 "row_id"
+  // 幂等：已在其他路径迁移过的数据会跳过（headerRow[0] === 'row_id'）
+  if (data && typeof data === 'object') {
+    Object.keys(data).forEach(k => {
+      if (!k.startsWith('sheet_')) return;
+      const sheet = data[k] as Sheet_ACU;
+      if (!sheet || !Array.isArray(sheet.content) || sheet.content.length === 0) return;
+      const headerRow = sheet.content[0];
+      if (!Array.isArray(headerRow) || headerRow.length === 0) return;
+      if (headerRow[0] === 'row_id') return;
+      if (headerRow[0] !== null) return;
+      headerRow[0] = 'row_id';
+      for (let i = 1; i < sheet.content.length; i++) {
+        const row = sheet.content[i];
+        if (Array.isArray(row) && row[0] === null) {
+          row[0] = String(i);
+        }
+      }
+    });
+  }
+
   if (foundSheets.size === 0 || checkpointMessageIndex === undefined) {
     return { checkpoint: null, modifiedKeys: [], updateGroupKeys: [] };
   }
@@ -286,28 +308,18 @@ export function createLegacyRootCheckpoint_ACU(
 export function migrateLegacyCheckpointToRootMessage_ACU(
   chat: any[],
   isolationKey: string,
-  isolationConfig: IsolationConfig_ACU,
   checkpoint: TableCheckpointV2_ACU,
-  options: { retainRecentLayers?: number } = {},
+  targetMessageIndex: number,
 ): LegacyRootCheckpointMigrationResult_ACU | null {
-  const anchorMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(
-    chat,
-    isolationKey,
-    isolationConfig,
-    options.retainRecentLayers,
-  );
-  if (anchorMessageIndex < 0) return null;
+  if (targetMessageIndex < 0 || targetMessageIndex >= chat.length) return null;
 
-  const anchorMessage = chat[anchorMessageIndex];
-  if (!anchorMessage || anchorMessage.is_user) return null;
+  const anchorMessage = chat[targetMessageIndex];
+  if (!anchorMessage) return null;
+  if (anchorMessage.is_user) return null;
 
-  const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, anchorMessageIndex);
+  const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, targetMessageIndex);
 
   migrateLegacyCheckpointToMessage_ACU(anchorMessage, isolationKey, rootCheckpoint);
 
-  for (const message of chat) {
-    clearCurrentIsolationLegacyTableSnapshots_ACU(message, isolationKey, isolationConfig);
-  }
-
-  return { messageIndex: anchorMessageIndex, checkpoint: rootCheckpoint };
+  return { messageIndex: targetMessageIndex, checkpoint: rootCheckpoint };
 }

@@ -5,6 +5,7 @@
 import { CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU, CHAT_SHEET_GUIDE_VERSION_ACU } from '../../../data/storage/chat-history';
 import { TABLE_ORDER_FIELD_ACU } from '../../../shared/constants';
 import { ensureExportConfigDefaults_ACU } from '../../worldbook/injection-engine';
+import { parseDDLColumnComments, parseDDLColumnNames } from '../../../shared/ddl-utils';
 
 /**
  * 规范化聊天作用域配置来源字符串
@@ -35,7 +36,18 @@ export function normalizeGuideData_ACU(dataObj: any) {
         if (!k.startsWith('sheet_')) return;
         const s = dataObj[k];
         if (!s || typeof s !== 'object') return;
-        const headerRow = Array.isArray(s.content) && Array.isArray(s.content[0]) ? s.content[0] : [null];
+        let headerRow = Array.isArray(s.content) && Array.isArray(s.content[0]) ? s.content[0] : null;
+        // 表头缺失或为空/全null → 从 sourceData.ddl 推导
+        if (!headerRow || headerRow.length === 0 || headerRow.every(v => v === null || v === undefined || String(v ?? '').trim() === '')) {
+            const ddl = s.sourceData?.ddl;
+            if (ddl && typeof ddl === 'string') {
+                try {
+                    const comments = parseDDLColumnComments(ddl);
+                    headerRow = parseDDLColumnNames(ddl).map(sqlName => comments.get(sqlName) || sqlName);
+                } catch (_) { headerRow = null; }
+            }
+        }
+        if (!headerRow || headerRow.length === 0) headerRow = ['row_id'];
         const keep: Record<string, any> = {
             uid: s.uid || k,
             name: s.name || k,

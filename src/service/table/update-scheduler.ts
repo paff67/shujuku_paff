@@ -7,6 +7,8 @@
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
+import { applyMergedEdits_ACU, extractEditsFromAiResponse_ACU, mergeAiEditContents_ACU, generateDeferredResponsesForPreparedCalls_ACU } from './update-orchestrator';
+import { isSqliteMode } from './storage-mode';
 import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 
 export interface TableUpdateItem {
@@ -207,64 +209,120 @@ export interface AutoUpdateOperations {
 }
 
 /**
- * 执行自动更新计划：并发分组执行 + 自动合并检测 + 旧数据清理
- * 
- * 纯业务编排逻辑：决定执行顺序、并发策略、错误处理。
- * 不驱动 UI，只返回结果。presentation 层根据返回值自行决定 UI 操作。
+ * 执行自动更新计划（新架构：合并前置）
  */
 export async function executeAutoUpdatePlan_ACU(
     plan: AutoUpdatePlan,
     settings: any,
     setAutoUpdating: (v: boolean) => void,
-    ops: AutoUpdateOperations
+    ops: AutoUpdateOperations,
 ): Promise<AutoUpdateResult> {
     const { tablesToUpdate, updateGroups } = plan;
     const groupKeys = Object.keys(updateGroups);
-    if (groupKeys.length === 0) return { success: true, failedGroups: 0, totalGroups: 0 };
+    if (groupKeys.length === 0) {
+        setAutoUpdating(false);
+        return { success: true, failedGroups: 0, totalGroups: 0 };
+    }
 
     const totalGroups = groupKeys.length;
     const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
+    const failedGroupKeys: string[] = [];
 
     setAutoUpdating(true);
 
-    const failedGroupKeys: string[] = [];
-    for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-        const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-        const groupPromises = chunkKeys.map(key => (async () => {
-            const group = updateGroups[key];
-            logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-
-            const success = await ops.processUpdates(group.indices, 'auto_independent', {
-                targetSheetKeys: group.sheetKeys,
-                batchSize: group.batchSize,
-                requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
-            });
-
-            return { key, success, sheetNames: group.sheetNames };
-        })());
-
-        const results = await Promise.allSettled(groupPromises);
-        results.forEach((result, idx) => {
-            if (result.status === 'rejected' || !result.value?.success) {
-                failedGroupKeys.push(chunkKeys[idx]);
+    try {
+        // ═══ Task 4: 合并前置架构 ═══
+        // 阶段1: 按 chunk 并发准备 AI 请求（所有组）
+        const allPreparedCalls: any[] = [];
+        for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
+            const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
+            for (const gKey of chunkKeys) {
+                const group = updateGroups[gKey];
+                const prepareResult = await ops.processUpdates(group.indices, 'auto_independent', {
+                    targetSheetKeys: group.sheetKeys,
+                    batchSize: group.batchSize,
+                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+                    groupKey: gKey,
+                    prepareAiCallOnly: true,
+                });
+                if (!prepareResult.success) {
+                    failedGroupKeys.push(gKey);
+                } else if (prepareResult.preparedAiCalls) {
+                    allPreparedCalls.push(...prepareResult.preparedAiCalls);
+                }
             }
-        });
+            if (failedGroupKeys.length > 0) break;
+        }
+
+        if (failedGroupKeys.length === 0 && allPreparedCalls.length > 0) {
+            // 阶段2: 并发 AI 生成
+            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(allPreparedCalls, undefined);
+            if (!generationResult.success) {
+                logWarn_ACU(`[Auto] AI 生成失败: ${generationResult.error}`);
+                failedGroupKeys.push('__generation_failed__');
+            } else {
+                // 阶段3: 提取并合并所有编辑内容
+                const allEditBlocks: string[] = [];
+                for (const resp of generationResult.responses) {
+                    const edits = extractEditsFromAiResponse_ACU(resp.aiResponse);
+                    if (edits) allEditBlocks.push(edits);
+                }
+
+                if (allEditBlocks.length > 0) {
+                    // 收集所有 sheetKeys 并集
+                    const allSheetKeys: string[] = [];
+                    for (const key of groupKeys) {
+                        const group = updateGroups[key];
+                        if (Array.isArray(group.sheetKeys)) {
+                            for (const sk of group.sheetKeys) {
+                                if (!allSheetKeys.includes(sk)) allSheetKeys.push(sk);
+                            }
+                        }
+                    }
+
+                    const mergedEdits = mergeAiEditContents_ACU(allEditBlocks);
+                    logDebug_ACU(`[Auto] 合并 ${allEditBlocks.length} 个编辑块，执行 applyMergedEdits...`);
+
+                    // 阶段4: 单次执行合并编辑
+                    const applyResult = await applyMergedEdits_ACU(mergedEdits, 'auto', allSheetKeys);
+                    if (!applyResult.success) {
+                        failedGroupKeys.push('__apply_failed__');
+                    } else {
+                        // 阶段5: 单次持久化（保存到最远楼层）
+                        let primarySaveTargetIndex = -1;
+                        for (const key of groupKeys) {
+                            const group = updateGroups[key];
+                            if (Array.isArray(group.indices) && group.indices.length > 0) {
+                                const last = group.indices[group.indices.length - 1];
+                                if (last > primarySaveTargetIndex) primarySaveTargetIndex = last;
+                            }
+                        }
+                        if (primarySaveTargetIndex < 0) primarySaveTargetIndex = 0;
+
+                        const { persistTablesToChatMessage_ACU } = await import('../table/table-service');
+                        await persistTablesToChatMessage_ACU({
+                            targetMessageIndex: primarySaveTargetIndex,
+                            targetSheetKeys: applyResult.modifiedKeys,
+                            updateGroupKeys: allSheetKeys,
+                            trackingSheetKeys: applyResult.modifiedKeys,
+                            trackAsUpdate: true,
+                            beforeData: applyResult.beforeData,
+                            afterData: applyResult.afterData,
+                        });
+                    }
+                }
+            }
+        }
+    } finally {
+        setAutoUpdating(false);
+        // 并发更新完成后统一刷新数据链条
+        logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+        await ops.loadAllChatMessages();
+        await ops.refreshData();
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await ops.refreshData();
     }
 
-    if (failedGroupKeys.length > 0) {
-        logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
-    }
-
-    // 并发更新完成后统一刷新数据链条
-    logDebug_ACU(`All group updates completed. Forcing data refresh...`);
-    await ops.loadAllChatMessages();
-    await ops.refreshData();
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    setAutoUpdating(false);
-    await ops.refreshData();
-
-    // 自动合并总结检测
     let autoMergeTriggered = false;
     let autoMergeSuccess = false;
     try {

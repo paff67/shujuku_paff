@@ -1,6 +1,7 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import type { RowChangeV2_ACU, SheetDeltaV2_ACU, TableLayerDeltaV2_ACU } from './table-delta-types';
 import { buildRowIdentityMap_ACU, cloneTableRow_ACU, getSheetHeader_ACU } from './table-row-identity';
+import { parseDDLColumnComments, parseDDLColumnNames } from '../../shared/ddl-utils';
 
 function cloneJson_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -32,7 +33,21 @@ function canCreateSheetFromDelta_ACU(delta: SheetDeltaV2_ACU): boolean {
 
 function createSheetFromDelta_ACU(sheetKey: string, delta: SheetDeltaV2_ACU): Sheet_ACU {
   const meta = (delta.sheetMeta || {}) as Partial<Sheet_ACU>;
-  const header = delta.header ? cloneTableRow_ACU(delta.header) : ['row_id'];
+  let header = delta.header ? cloneTableRow_ACU(delta.header) : null;
+  if (!header) {
+    // delta 无 header → 尝试从 sourceData.ddl 推导表头行（中文名列）
+    const ddl = (meta as any)?.sourceData?.ddl;
+    if (ddl && typeof ddl === 'string') {
+      try {
+        const comments = parseDDLColumnComments(ddl);
+        const colNames = parseDDLColumnNames(ddl);
+        header = colNames.map(sqlName => comments.get(sqlName) || sqlName);
+      } catch (_) { /* DDL 解析失败，回退 */ }
+    }
+    if (!header || header.length === 0) {
+      header = ['row_id'];
+    }
+  }
   return {
     uid: String(meta.uid || sheetKey),
     name: String(meta.name || delta.sheetName || sheetKey),

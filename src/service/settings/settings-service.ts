@@ -23,6 +23,7 @@ import { getCurrentCharSettings_ACU, getCurrentWorldbookConfig_ACU } from './set
 import { getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { deepMerge_ACU, ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { parseDDLColumnComments, parseDDLColumnNames } from '../../shared/ddl-utils';
 
 export type SaveSettingsResult_ACU = {
   saved: boolean;
@@ -476,6 +477,18 @@ export   function loadTemplateFromStorage_ACU(codeOverride: any = null) {
                   // [Profile] 模板载入时先补齐/修复顺序编号，并回写（编号可随导出/导入迁移）
                   const sheetKeys = Object.keys(parsedTemplate).filter(k => k.startsWith('sheet_'));
                   ensureSheetOrderNumbers_ACU(parsedTemplate, { baseOrderKeys: sheetKeys, forceRebuild: false });
+                  // [修复] 第三方/导入模板 content 可能为 [[]]（空表头行），从 DDL 推导补全
+                  for (const sk of sheetKeys) {
+                      const sheet = parsedTemplate[sk];
+                      if (sheet && Array.isArray(sheet.content) && sheet.content.length > 0
+                          && Array.isArray(sheet.content[0]) && sheet.content[0].length === 0
+                          && sheet.sourceData?.ddl && typeof sheet.sourceData.ddl === 'string') {
+                          try {
+                              const comments = parseDDLColumnComments(sheet.sourceData.ddl);
+                              sheet.content = [parseDDLColumnNames(sheet.sourceData.ddl).map(sqlName => comments.get(sqlName) || sqlName)];
+                          } catch (_) { /* DDL 解析失败，保持原样 */ }
+                      }
+                  }
                   // [瘦身] 无论是否 changed，都清洗模板（去掉 domain/type/enable/triggerSend*/config/customStyles 等冗余字段）
                   const sanitizedTemplate = sanitizeChatSheetsObject_ACU(parsedTemplate, { ensureMate: true });
                   _set_TABLE_TEMPLATE_ACU(JSON.stringify(sanitizedTemplate));

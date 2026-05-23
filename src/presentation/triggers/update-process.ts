@@ -274,6 +274,44 @@ export async function handleManualUpdate_ACU() {
 
         // 调用 service 层，传入 clearBeforeUpdate: true（用户已确认清空）
         _set_wasStoppedByUser_ACU(false);
+
+        // 手动更新进度 toast（和自动更新保持一致）
+        const manualStopButtonId = `acu-stop-manual-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const manualStopButtonHtml = renderStopButton_ACU(manualStopButtonId, '终止');
+        const manualInitialMessage = '正在准备手动填表...';
+        const manualToastMessage = `<div><span class="acu-toast-progress-message">${manualInitialMessage}</span>${manualStopButtonHtml}</div>`;
+        let manualLoadingToast: any = null;
+        if (typeof toastr_API_ACU !== 'undefined') {
+            notifyTableFillStart();
+            manualLoadingToast = showToastr_ACU('info', manualToastMessage, {
+                timeOut: 0,
+                extendedTimeOut: 0,
+                tapToDismiss: false,
+                acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+                onShown: function () {
+                    if (typeof bindTableFillStopButton_ACU === 'function') {
+                        bindTableFillStopButton_ACU(manualStopButtonId, () => {
+                            _set_wasStoppedByUser_ACU(true);
+                            abortAllActiveRequests_ACU();
+                            _set_isAutoUpdatingCard_ACU(false);
+                            updateStatusText('手动填表已终止...', false);
+                            updateLoadingToastMessage(manualLoadingToast, '手动填表已终止...');
+                            showToastr_ACU('warning', '手动填表任务已由用户终止。');
+                        });
+                    }
+                },
+            });
+        }
+
+        const manualOnProgress = (event: CardUpdateProgressEvent) => {
+            const message = buildProgressMessage(event);
+            updateStatusText(message, false);
+            updateLoadingToastMessage(manualLoadingToast, message);
+            if (event.phase === 'retry') {
+                showToastr_ACU('warning', message, { timeOut: 5000 });
+            }
+        };
+
         const result = await orchestrateManualUpdate_ACU(
             targetKeys,
             // processBatch 回调
@@ -284,9 +322,15 @@ export async function handleManualUpdate_ACU() {
             async () => {
                 await refreshMergedDataAndNotifyWithUI_ACU();
             },
-            // [新增] 传入用户确认后的预清空选项
-            { clearBeforeUpdate: true }
+            // 传入用户确认后的预清空选项
+            { clearBeforeUpdate: true },
+            manualOnProgress,
         );
+
+        // 清除进度 toast
+        if (manualLoadingToast && toastr_API_ACU) {
+            toastr_API_ACU.clear(manualLoadingToast);
+        }
 
         // UI：根据返回值显示 toast
         if (result.success) {

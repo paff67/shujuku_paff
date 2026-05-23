@@ -38,13 +38,152 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
 }
 import { checkIfFirstTimeInit_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { parseAndApplyTableEdits_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
-import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
-import { isSqliteMode } from './storage-mode';
-import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
-import { clearTableDataAtFloors_ACU } from '../chat/chat-service';
-import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
-import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
+import { extractTableEditInner_ACU } from '../ai/prompt-builder/table-edit-parser';
+
+// ═══ Task 1: 提取和合并 AI 响应编辑内容 ═══
+
+/**
+ * 从单个 AI 响应中提取编辑内容（去掉 <tableEdit> 标签和注释标记）。
+ * 返回原始编辑文本，不执行。
+ * 注意：默认 useLastPairOnly=true，只提取最后一个 <tableEdit> 块。
+ */
+export function extractEditsFromAiResponse_ACU(aiResponse: string): string | null {
+    if (!aiResponse || typeof aiResponse !== 'string') return null;
+    const extracted = extractTableEditInner_ACU(aiResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
+    if (!extracted?.inner) return null;
+    return extracted.inner.replace(/<!--|-->/g, '').trim();
+}
+
+/**
+ * 合并多个 AI 响应的编辑内容为一个统一文本。
+ * SQL 模式和原生模式都能处理。
+ */
+export function mergeAiEditContents_ACU(editBlocks: string[]): string {
+    if (!Array.isArray(editBlocks)) return '';
+    const nonEmpty = editBlocks.filter(s => typeof s === 'string' && s.trim());
+    if (nonEmpty.length === 0) return '';
+    if (nonEmpty.length === 1) return nonEmpty[0];
+    // 统一用双换行分隔（SQL 的分号自然断句，原生模式的指令行也各自独立）
+    return nonEmpty.join('\n\n');
+}
+// ═══ Task 2: 单次执行合并后的编辑 ═══
+
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
+
+/**
+ * 在当前状态上执行合并后的 AI 编辑。
+ *
+ * - SQLite 模式：
+ *   1. 调用 provider._ensureInitialized() + _ensureTablesFromTemplate() 建表（如果表不存在）
+ *   2. provider.applyEdits(sql) 执行 SQL
+ * - 原生模式：
+ *   将编辑内容包装在 <tableEdit>...</tableEdit> 中，调用 parseAndApplyTableEdits_ACU
+ *
+ * 返回 beforeData / afterData / modifiedKeys。
+ * 不调用 replaceCurrentData，不触发 persistTablesToChatMessage。
+ *
+ * @param mergedEditContent 合并后的编辑文本（SQL 或原生指令）
+ * @param updateMode 更新模式（'standard' | 'auto' | 'manual_summary' 等）
+ * @param targetSheetKeys 目标表键列表（用于过滤 modifiedKeys）
+ */
+export async function applyMergedEdits_ACU(
+    mergedEditContent: string,
+    updateMode: string,
+    targetSheetKeys: string[] | null,
+): Promise<{
+    success: boolean;
+    beforeData: TableDataObject_ACU | null;
+    afterData: TableDataObject_ACU | null;
+    modifiedKeys: string[];
+    error?: string;
+}> {
+    if (!mergedEditContent || !mergedEditContent.trim()) {
+        return { success: false, beforeData: null, afterData: null, modifiedKeys: [], error: '无有效编辑内容' };
+    }
+    if (!currentJsonTableData_ACU) {
+        return { success: false, beforeData: null, afterData: null, modifiedKeys: [], error: 'currentJsonTableData_ACU 未加载' };
+    }
+
+    // 克隆 beforeData
+    const beforeData = JSON.parse(JSON.stringify(currentJsonTableData_ACU)) as TableDataObject_ACU;
+
+    try {
+        if (isSqliteMode()) {
+            const provider = getStorageProvider();
+            // 1. 建表（如果表不存在）
+            try {
+                (provider as any)._ensureInitialized?.();
+                (provider as any)._ensureTablesFromTemplate?.();
+            } catch (e: any) {
+                logWarn_ACU('[applyMergedEdits] 建表失败，继续执行编辑:', e?.message);
+            }
+
+            // 2. 执行编辑
+            const result = provider.applyEdits(mergedEditContent, updateMode);
+            if (!result.success) {
+                return {
+                    success: false,
+                    beforeData,
+                    afterData: null,
+                    modifiedKeys: [],
+                };
+            }
+
+            // 3. 克隆 afterData
+            const afterData = JSON.parse(JSON.stringify(currentJsonTableData_ACU)) as TableDataObject_ACU;
+
+            // 4. 收集 modifiedKeys
+            const modifiedKeys = Array.isArray(result.modifiedKeys)
+                ? (targetSheetKeys
+                    ? result.modifiedKeys.filter((k: string) => targetSheetKeys.includes(k))
+                    : result.modifiedKeys)
+                : (targetSheetKeys || []);
+
+            return { success: true, beforeData, afterData, modifiedKeys };
+        } else {
+            // 原生模式：将编辑内容包装在 <tableEdit>...</tableEdit> 中
+            const wrappedContent = `<tableEdit>${mergedEditContent}</tableEdit>`;
+            const result = parseAndApplyTableEdits_ACU(wrappedContent, updateMode, false);
+
+            if (!result || (typeof result === 'object' && result.success === false)) {
+                return {
+                    success: false,
+                    beforeData,
+                    afterData: null,
+                    modifiedKeys: [],
+                    error: typeof result === 'object' ? (result as any).error || '原生模式执行失败' : '原生模式执行失败',
+                };
+            }
+
+            // 克隆 afterData
+            const afterData = JSON.parse(JSON.stringify(currentJsonTableData_ACU)) as TableDataObject_ACU;
+
+            // 收集 modifiedKeys
+            const modifiedKeys = Array.isArray((result as any).modifiedKeys)
+                ? (targetSheetKeys
+                    ? (result as any).modifiedKeys.filter((k: string) => targetSheetKeys.includes(k))
+                    : (result as any).modifiedKeys)
+                : (targetSheetKeys || []);
+
+            return { success: true, beforeData, afterData, modifiedKeys };
+        }
+    } catch (e: any) {
+        logError_ACU('[applyMergedEdits] 执行合并编辑失败:', e);
+        return {
+            success: false,
+            beforeData,
+            afterData: null,
+            modifiedKeys: [],
+            error: e?.message || String(e),
+        };
+    }
+}
+import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
+import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
+import { isSqliteMode } from './storage-mode';
+import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
+import { clearTableDataAtFloors_ACU } from '../chat/chat-service';
+import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
 
 // ============================================================
 // 类型定义：返回值 + 进度事件（service 层不驱动 UI）
@@ -769,44 +908,55 @@ export async function processUpdatesBatch_ACU(
             const lastMessageIndexOfBatch = batchIndices[batchIndices.length - 1];
             const finalSaveTargetIndex = lastMessageIndexOfBatch;
 
-            // 构建合并基底
-            const baseResult = buildBatchMergeBase_ACU(batchNumber);
-            if (!baseResult.data) {
-                return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
-            }
-            const mergedBatchData = baseResult.data;
-
-            const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
-            const batchIsolationKey = getCurrentIsolationKey_ACU();
-
-            // 加载历史数据
-            const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
-            if (isSqliteMode()) {
-                const provider = getStorageProvider();
-                const providerCurrentDataBeforeReplace = provider.getCurrentData();
-                const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(
-                    mergedBatchData,
-                    providerCurrentDataBeforeReplace,
-                    batchSheetKeys,
-                );
-                if (patchedCount > 0) {
-                    logWarn_ACU(`[Batch ${batchNumber}] SQLite batch base preserved provider rows for ${patchedCount} sheet(s) before replacing runtime data.`);
+            // [修复] deferPersistence 模式下，不在 batch 循环中 replaceCurrentData——
+            // 1. 避免 batch 之间丢弃前序 batch 已 applyEdits 到 SQLite 的修改
+            // 2. 避免并发分组（手动/自动更新多组）时互相 dispose SQLite engine
+            // 3. 避免 replaceCurrentData(空壳) 覆盖前序组已修改的 currentJsonTableData_ACU
+            // 非 deferPersistence 时保持原有行为（每次 batch 重建基底）
+            if (!deferPersistence) {
+                // 构建合并基底
+                const baseResult = buildBatchMergeBase_ACU(batchNumber);
+                if (!baseResult.data) {
+                    return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
                 }
+                const mergedBatchData = baseResult.data;
 
-                await provider.replaceCurrentData(mergedBatchData as TableDataObject_ACU);
-                const providerCurrentData = provider.getCurrentData();
-                if (providerCurrentData) {
-                    _set_currentJsonTableData_ACU(providerCurrentData);
-                    logDebug_ACU(`[Batch ${batchNumber}] SQLite provider current data exported to JSON before prompt preparation.`);
+                const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
+                const batchIsolationKey = getCurrentIsolationKey_ACU();
+
+                // 加载历史数据
+                const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
+                if (isSqliteMode()) {
+                    const provider = getStorageProvider();
+                    const providerCurrentDataBeforeReplace = provider.getCurrentData();
+                    const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(
+                        mergedBatchData,
+                        providerCurrentDataBeforeReplace,
+                        batchSheetKeys,
+                    );
+                    if (patchedCount > 0) {
+                        logWarn_ACU(`[Batch ${batchNumber}] SQLite batch base preserved provider rows for ${patchedCount} sheet(s) before replacing runtime data.`);
+                    }
+
+                    await provider.replaceCurrentData(mergedBatchData as TableDataObject_ACU);
+                    const providerCurrentData = provider.getCurrentData();
+                    if (providerCurrentData) {
+                        _set_currentJsonTableData_ACU(providerCurrentData);
+                        logDebug_ACU(`[Batch ${batchNumber}] SQLite provider current data exported to JSON before prompt preparation.`);
+                    } else {
+                        _set_currentJsonTableData_ACU(mergedBatchData);
+                        logWarn_ACU(`[Batch ${batchNumber}] SQLite provider returned null current data after replace; falling back to merged batch data.`);
+                    }
+                    logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
                 } else {
                     _set_currentJsonTableData_ACU(mergedBatchData);
-                    logWarn_ACU(`[Batch ${batchNumber}] SQLite provider returned null current data after replace; falling back to merged batch data.`);
                 }
-                logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
+                logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
             } else {
-                _set_currentJsonTableData_ACU(mergedBatchData);
+                // deferPersistence 模式：跳过 replaceCurrentData，
+                // 直接使用当前 provider 状态（已包含前序 batch 的修改）
+                logDebug_ACU(`[Batch ${batchNumber}] deferPersistence mode: skipping base rebuild, using current provider state directly.`);
             }
-            logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
 
             // 计算上下文范围
             let sliceStartIndex = firstMessageIndexOfBatch;
@@ -904,14 +1054,23 @@ export async function processUpdatesBatch_ACU(
     }
 }
 
-async function generateDeferredResponsesForPreparedCalls_ACU(
+export async function generateDeferredResponsesForPreparedCalls_ACU(
     preparedCalls: PreparedAiCall_ACU[],
+    onProgress?: (event: CardUpdateProgressEvent) => void,
 ): Promise<{ success: boolean; responses: DeferredAiResponse_ACU[]; error?: string }> {
     if (preparedCalls.length === 0) {
         return { success: true, responses: [] };
     }
 
     const settled = await Promise.allSettled(preparedCalls.map(async (prepared, chunkOrder) => {
+        onProgress?.({
+            phase: 'calling_ai',
+            attempt: chunkOrder + 1,
+            maxRetries: preparedCalls.length,
+            currentBatch: prepared.batchNumber || (chunkOrder + 1),
+            totalBatches: preparedCalls.length,
+            message: `第 ${chunkOrder + 1}/${preparedCalls.length} 组 AI 调用`,
+        });
         const abortController = new AbortController();
         logDebug_ACU(`[Manual Two-Phase] Generating preparedCallId=${prepared.preparedCallId}, target=${prepared.targetMessageIndex}.`);
         const aiResponse = await callCustomOpenAI_ACU(prepared.dynamicContent, abortController, prepared.requestOptions);
@@ -979,7 +1138,8 @@ function compareDeferredCommitOrder_ACU(a: DeferredCommitPayload_ACU, b: Deferre
         || String(a.preparedCallId || '').localeCompare(String(b.preparedCallId || ''));
 }
 
-async function commitMergedDeferredCommits_ACU(
+// @deprecated 新架构不再使用此函数（由 applyMergedEdits_ACU + persistTablesToChatMessage_ACU 替代）
+export async function commitMergedDeferredCommits_ACU(
     commits: DeferredCommitPayload_ACU[],
 ): Promise<{ success: boolean; error?: string }> {
     if (!Array.isArray(commits) || commits.length === 0) {
@@ -1067,6 +1227,7 @@ export async function orchestrateManualUpdate_ACU(
     processBatch: (indices: number[], mode: string, options: any) => Promise<BatchUpdateResult>,
     refreshData: () => Promise<void>,
     options: { clearBeforeUpdate?: boolean } = {},
+    onProgress?: (event: CardUpdateProgressEvent) => void,
 ): Promise<ManualUpdateResult> {
     try {
         if (isAutoUpdatingCard_ACU) {
@@ -1198,7 +1359,6 @@ export async function orchestrateManualUpdate_ACU(
         for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
             const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
             const preparedCalls: PreparedAiCall_ACU[] = [];
-            const deferredCommits: DeferredCommitPayload_ACU[] = [];
 
             for (let groupOffset = 0; groupOffset < chunkKeys.length; groupOffset++) {
                 const gKey = chunkKeys[groupOffset];
@@ -1233,7 +1393,7 @@ export async function orchestrateManualUpdate_ACU(
                 break;
             }
 
-            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCalls);
+            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCalls, onProgress);
             if (!generationResult.success) {
                 failedGroups.push({
                     key: chunkKeys[0],
@@ -1244,46 +1404,97 @@ export async function orchestrateManualUpdate_ACU(
                 break;
             }
 
-            for (let groupOffset = 0; groupOffset < chunkKeys.length; groupOffset++) {
-                const gKey = chunkKeys[groupOffset];
+            // ═══ Task 3: 合并前置 — 从这里开始替换为新架构 ═══
+            // 收集所有组的 sheetKeys 并集
+            const allSheetKeys: string[] = [];
+            for (const gKey of chunkKeys) {
                 const group = updateGroups[gKey];
-                const groupPreparedCallIds = new Set(
-                    preparedCalls
-                        .filter(call => call.preparedCallId.startsWith(`${gKey}:`))
-                        .map(call => call.preparedCallId),
-                );
-                const groupDeferredResponses = generationResult.responses.filter(response =>
-                    response.preparedCallId ? groupPreparedCallIds.has(response.preparedCallId) : false,
-                );
-                const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
-                const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
-                const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
-                const requestOptions = tableApiPreset ? { tableApiPreset } : null;
-                const applyResult = await processBatch(group.indices, 'manual_independent', {
-                    targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
-                    requestOptions,
-                    groupKey: gKey,
-                    groupOrder: start + groupOffset,
-                    deferPersistence: true,
-                    deferredResponses: groupDeferredResponses,
-                });
-                if (!applyResult.success) {
-                    failedGroups.push({
-                        key: gKey,
-                        error: applyResult.error || '手动更新分组串行应用失败。',
-                    });
-                    break;
+                if (Array.isArray(group.sheetKeys)) {
+                    for (const sk of group.sheetKeys) {
+                        if (!allSheetKeys.includes(sk)) allSheetKeys.push(sk);
+                    }
                 }
-                deferredCommits.push(...(applyResult.deferredCommits || []));
             }
 
+            // 提取所有 AI 响应的编辑内容并合并
+            const allEditBlocks: string[] = [];
+            for (const resp of generationResult.responses) {
+                const edits = extractEditsFromAiResponse_ACU(resp.aiResponse);
+                if (edits) allEditBlocks.push(edits);
+            }
+            if (allEditBlocks.length === 0) {
+                // 没有 AI 响应包含有效编辑
+                failedGroups.push({ key: chunkKeys[0], error: '所有 AI 响应均未包含有效编辑内容。' });
+                break;
+            }
+            const mergedEdits = mergeAiEditContents_ACU(allEditBlocks);
+
+            // 单次执行合并后的编辑
+            onProgress?.({ phase: 'parsing', message: '正在应用合并后的编辑...' });
+            const applyResult = await applyMergedEdits_ACU(mergedEdits, 'standard', allSheetKeys);
+            if (!applyResult.success) {
+                failedGroups.push({ key: chunkKeys[0], error: applyResult.error || '应用合并编辑失败。' });
+                break;
+            }
+
+            // ═══ Task 3 (续): 单次持久化 ═══
+            // primarySaveTargetIndex 声明提前到当前块顶部，供后续首次初始化和向量归档使用
+            let primarySaveTargetIndex = -1;
+            for (const gKey of chunkKeys) {
+                const group = updateGroups[gKey];
+                if (Array.isArray(group.indices) && group.indices.length > 0) {
+                    const last = group.indices[group.indices.length - 1];
+                    if (last > primarySaveTargetIndex) primarySaveTargetIndex = last;
+                }
+            }
+            if (primarySaveTargetIndex < 0) primarySaveTargetIndex = 0;
+
             if (failedGroups.length === 0) {
-                const commitResult = await commitMergedDeferredCommits_ACU(deferredCommits);
-                if (!commitResult.success) {
-                    failedGroups.push({
-                        key: chunkKeys[0],
-                        error: commitResult.error || '手动更新合并提交失败。',
+                onProgress?.({ phase: 'saving', message: '正在保存合并后的更新到聊天记录...' });
+
+                const saveResult = await persistTablesToChatMessage_ACU({
+                    targetMessageIndex: primarySaveTargetIndex,
+                    targetSheetKeys: applyResult.modifiedKeys,
+                    updateGroupKeys: allSheetKeys,
+                    trackingSheetKeys: applyResult.modifiedKeys,
+                    trackAsUpdate: true,
+                    beforeData: applyResult.beforeData,
+                    afterData: applyResult.afterData,
+                });
+                if (!saveResult.saved) {
+                    failedGroups.push({ key: chunkKeys[0], error: '无法将更新后的数据库保存到聊天记录。' });
+                }
+
+                // ═══ Task 3 (续): 首次初始化补全 + 向量索引归档 ═══
+                // [保持原有逻辑] 如果是首次初始化，需要补充模板中的其他表（未被 AI 修改的）
+                const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
+                if (isFirstTimeInit) {
+                    const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
+                    if (fullTemplate) {
+                        for (const sheetKey of allSheetKeys) {
+                            if (!applyResult.modifiedKeys.includes(sheetKey) && fullTemplate[sheetKey]) {
+                                (currentJsonTableData_ACU as any)[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data.`);
+                            }
+                        }
+                    }
+                }
+
+                // [保持原有逻辑] 填表完成后强制应用编码索引列特殊锁定（AM序列）
+                applySpecialIndexSequenceToSummaryTables_ACU(currentJsonTableData_ACU);
+
+                // [保持原有逻辑] 向量索引防抖归档（交火模式）
+                if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                    enqueueSummaryVectorIndexFlush_ACU({
+                        targetMessageIndex: primarySaveTargetIndex,
+                        mode: 'sync',
+                        reason: 'table_fill_complete',
+                    }).then(result => {
+                        if (result.skipped) {
+                            logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}`);
+                        }
+                    }).catch(err => {
+                        logWarn_ACU('[交火模式纪要索引] 填表完成后防抖归档入队异常:', err);
                     });
                 }
             }

@@ -33,6 +33,7 @@ import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqli
 import { getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
+import { parseDDLColumnComments, parseDDLColumnNames } from '../../shared/ddl-utils';
 
 export class SqlTableService implements ITableStorageProvider {
   readonly mode = 'sqlite' as const;
@@ -107,6 +108,23 @@ export class SqlTableService implements ITableStorageProvider {
       }
 
       // 将 JSON 数据加载到 SQLite
+      // [防御] 修复 content 表头为空的 sheet——从 DDL 推导列名和中文注释
+      // 这处理了历史数据被污染（content=[[]] 或 content[0] 为空数组）的场景
+      if (mergedData) {
+        const sheetKeys = Object.keys(mergedData).filter(k => k.startsWith('sheet_'));
+        for (const sk of sheetKeys) {
+          const sheet = (mergedData as any)[sk];
+          if (sheet?.sourceData?.ddl && Array.isArray(sheet.content)) {
+            const headers = sheet.content[0];
+            if (!Array.isArray(headers) || headers.length === 0 || headers.every((v: any) => v === null || v === undefined || String(v ?? '').trim() === '')) {
+              try {
+                const comments = parseDDLColumnComments(sheet.sourceData.ddl);
+                sheet.content[0] = parseDDLColumnNames(sheet.sourceData.ddl).map((sqlName: string) => comments.get(sqlName) || sqlName);
+              } catch (_) { /* DDL 解析失败，保持原样 */ }
+            }
+          }
+        }
+      }
       this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU);
 
       // 更新全局 JSON 视图
