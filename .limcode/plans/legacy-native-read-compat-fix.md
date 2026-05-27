@@ -7,7 +7,7 @@
 - [x] 补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行  `#legacy_native_fix_4`
 - [x] 运行定向 vitest、关键回归、tsc、rollup，并处理失败  `#legacy_native_fix_5`
 - [x] 调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界  `#legacy_native_fix_6`
-- [ ] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7`
+- [x] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7`
 <!-- LIMCODE_TODO_LIST_END -->
 
 # 旧原生模式记录读取兼容修复计划

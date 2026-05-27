@@ -1,6 +1,6 @@
 # 项目进度
 - Project: SP数据库
-- Updated At: 2026-05-27T11:27:34.845Z
+- Updated At: 2026-05-27T11:40:29.182Z
 - Status: completed
 - Phase: review
 
@@ -29,7 +29,7 @@
 - [x] 补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行  `#legacy_native_fix_4`
 - [x] 运行定向 vitest、关键回归、tsc、rollup，并处理失败  `#legacy_native_fix_5`
 - [x] 调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界  `#legacy_native_fix_6`
-- [ ] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7` (in_progress)
+- [x] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7`
 <!-- LIMCODE_PROGRESS_TODOS_END -->
 
 ## 项目里程碑
@@ -47,7 +47,6 @@
 ## 最近更新
 
 <!-- LIMCODE_PROGRESS_LOG_START -->
-- 2026-05-23T09:58:50.437Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T10:38:02.497Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T10:42:29.104Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T11:05:44.935Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-snapshot-migration-refactor.md
@@ -67,6 +66,7 @@
 - 2026-05-27T10:53:57.843Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 - 2026-05-27T10:57:03.897Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 - 2026-05-27T11:27:34.845Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T11:40:29.182Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 <!-- LIMCODE_PROGRESS_LOG_END -->
 
 <!-- LIMCODE_PROGRESS_METADATA_START -->
@@ -76,7 +76,7 @@
   "projectId": "sp数据库",
   "projectName": "SP数据库",
   "createdAt": "2026-05-23T09:58:50.437Z",
-  "updatedAt": "2026-05-27T11:27:34.845Z",
+  "updatedAt": "2026-05-27T11:40:29.182Z",
   "status": "completed",
   "phase": "review",
   "currentFocus": "验收五项修复全部通过，round 串行快照模型健壮性修复完成",
@@ -121,18 +121,12 @@
     {
       "id": "legacy_native_fix_7",
       "content": "验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布",
-      "status": "in_progress"
+      "status": "completed"
     }
   ],
   "milestones": [],
   "risks": [],
   "log": [
-    {
-      "at": "2026-05-23T09:58:50.437Z",
-      "type": "artifact_changed",
-      "refId": "plan",
-      "message": "同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md"
-    },
     {
       "at": "2026-05-23T10:38:02.497Z",
       "type": "artifact_changed",
@@ -246,21 +240,27 @@
       "type": "artifact_changed",
       "refId": "plan",
       "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T11:40:29.182Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
     }
   ],
   "stats": {
     "milestonesTotal": 0,
     "milestonesCompleted": 0,
     "todosTotal": 7,
-    "todosCompleted": 6,
-    "todosInProgress": 1,
+    "todosCompleted": 7,
+    "todosInProgress": 0,
     "todosCancelled": 0,
     "activeRisks": 0
   },
   "render": {
     "rendererVersion": 1,
-    "generatedAt": "2026-05-27T11:27:34.845Z",
-    "bodyHash": "sha256:1ff115af4e1f24b2413ebc97fdbc007d3a370efa9b51869ecf20f3661b0913a6"
+    "generatedAt": "2026-05-27T11:40:29.182Z",
+    "bodyHash": "sha256:a79d17e6f9171d04a1538e3ba953423369860613d9390c0eb4c0a15551e14a18"
   }
 }
 <!-- LIMCODE_PROGRESS_METADATA_END -->
