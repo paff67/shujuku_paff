@@ -2,7 +2,7 @@
 // 从 04_shared_helpers.js 迁入
 
 import { handleApiResponse_ACU } from './prompt-builder';
-import { settings_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 
@@ -175,6 +175,33 @@ export   function getApiConfigByPreset_ACU(presetName: string) {
       tavernProfile: settings_ACU.tavernProfile
     };
   }
+
+export function resolveCurrentChatApiPresetName_ACU(chatId = currentChatFileIdentifier_ACU): string {
+    const presets = Array.isArray(settings_ACU.apiPresets) ? settings_ACU.apiPresets : [];
+    const exists = (name: string) => !!name && presets.some((p: any) => p?.name === name);
+    const chatKey = String(chatId || '').trim() || 'unknown_chat';
+    const bindings = settings_ACU.apiPresetBindingsByChat;
+    const bindingName = bindings && typeof bindings === 'object' && !Array.isArray(bindings)
+        ? String(bindings[chatKey]?.presetName || '').trim()
+        : '';
+    if (exists(bindingName)) return bindingName;
+    const defaultName = String(settings_ACU.defaultApiPresetName || '').trim();
+    if (exists(defaultName)) return defaultName;
+    return '';
+}
+
+export function applyCurrentChatApiPresetSelection_ACU(chatId = currentChatFileIdentifier_ACU): string {
+    const presetName = resolveCurrentChatApiPresetName_ACU(chatId);
+    if (!presetName) return '';
+    const preset = Array.isArray(settings_ACU.apiPresets)
+        ? settings_ACU.apiPresets.find((p: any) => p?.name === presetName)
+        : null;
+    if (!preset) return '';
+    settings_ACU.apiMode = preset.apiMode === 'tavern' ? 'tavern' : 'custom';
+    settings_ACU.apiConfig = JSON.parse(JSON.stringify(preset.apiConfig || {}));
+    settings_ACU.tavernProfile = typeof preset.tavernProfile === 'string' ? preset.tavernProfile : '';
+    return presetName;
+}
 
 
 export   async function callCustomOpenAI_ACU_Direct(messages: any[]) {

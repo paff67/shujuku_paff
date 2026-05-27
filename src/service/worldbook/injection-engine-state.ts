@@ -8,6 +8,7 @@ import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, generationGate
 import { getLorebookEntries_ACU, deleteLorebookEntries_ACU, getCurrentCharPrimaryLorebook_ACU as gwGetCurrentCharPrimaryLorebook_ACU, listLorebooks_ACU } from '../../data/gateways/worldbook-gateway';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU, saveSettings_ACU } from '../settings/settings-service';
+import { applyCurrentChatApiPresetSelection_ACU } from '../ai/api-call';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU } from './pipeline';
 import { cleanChatName_ACU, getChatFirstLayerMessage_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -58,6 +59,7 @@ import { purgeSheetKeysFromMessage_ACU } from '../../data/repositories/chat-mess
     // [FIX] Reload all settings to ensure template is not stale for new chats.
     // MUST be called AFTER setting currentChatFileIdentifier_ACU so it loads the correct character settings.
     loadSettings_ACU();
+    applyCurrentChatApiPresetSelection_ACU();
 
     _set_allChatMessages_ACU([]);
     _set_lastTotalAiMessages_ACU(0); // 重置 AI 消息计数
