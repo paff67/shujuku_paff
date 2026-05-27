@@ -219,6 +219,47 @@ describe('extractTableEditInner_ACU', () => {
     const result = extractTableEditInner_ACU(text);
     expect(result).not.toBeNull();
   });
+
+  // ═══ 思维链剥离 ═══
+  it('<thought> 块在提取前被剥离，不污染编辑内容', () => {
+    const text = '<thought>这是分析过程，不应出现在结果中</thought><tableEdit>INSERT INTO t VALUES (1);</tableEdit>';
+    const result = extractTableEditInner_ACU(text);
+    expect(result).not.toBeNull();
+    expect(result!.inner).toBe('INSERT INTO t VALUES (1);');
+    expect(result!.inner).not.toContain('分析过程');
+  });
+
+  it('<thinking> 块在提取前被剥离，不污染编辑内容', () => {
+    const text = '<thinking type="deep">逐步推理...\n多行分析</thinking><tableEdit>UPDATE t SET a=1;</tableEdit>';
+    const result = extractTableEditInner_ACU(text);
+    expect(result).not.toBeNull();
+    expect(result!.inner).toBe('UPDATE t SET a=1;');
+    expect(result!.inner).not.toContain('逐步推理');
+  });
+
+  it('孤立 <thought> 开标签被剥离', () => {
+    const text = '<thought>\n这是未闭合的思维\n</thought>\n<tableEdit>DELETE FROM t WHERE 1=1;</tableEdit>';
+    const result = extractTableEditInner_ACU(text);
+    expect(result).not.toBeNull();
+    expect(result!.inner).toBe('DELETE FROM t WHERE 1=1;');
+  });
+
+  it('<content> 包裹 <tableEdit> 时正确提取内部编辑', () => {
+    const text = '<thought>分析...</thought><content><tableEdit>INSERT INTO chronicle (row_id) VALUES (1);</tableEdit></content>';
+    const result = extractTableEditInner_ACU(text);
+    expect(result).not.toBeNull();
+    expect(result!.inner).toBe('INSERT INTO chronicle (row_id) VALUES (1);');
+    expect(result!.inner).not.toContain('分析');
+    expect(result!.inner).not.toContain('content');
+  });
+
+  it('多个思维链块全部被剥离', () => {
+    const text = '<thought>第一段思维</thought>中间文本<thinking>第二段思维</thinking><tableEdit>SELECT 1;</tableEdit>';
+    const result = extractTableEditInner_ACU(text);
+    expect(result).not.toBeNull();
+    expect(result!.inner).toBe('SELECT 1;');
+    expect(result!.inner).not.toContain('思维');
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

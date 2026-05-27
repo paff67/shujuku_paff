@@ -66,6 +66,101 @@ export function mergeAiEditContents_ACU(editBlocks: string[]): string {
     // 统一用双换行分隔（SQL 的分号自然断句，原生模式的指令行也各自独立）
     return nonEmpty.join('\n\n');
 }
+
+// ═══ 批次 round 构建模型 ═══
+// 将 updateGroups 按 group.batchSize 拆分为上下文子批次，
+// 然后按子批次索引对齐为 round。round 间严格串行，round 内各 group 可并发。
+
+/**
+ * 一个 round 内的单个执行项：某个 group 的第 N 个子批次。
+ */
+export interface FillRoundItem_ACU {
+    /** 分组 key */
+    groupKey: string;
+    /** 原始 group 对象引用（含 indices/batchSize/sheetKeys 等） */
+    group: any;
+    /** 本次子批次的上下文消息索引 */
+    batchIndices: number[];
+    /** 该子批次在所属 group 内的序号（1-based） */
+    batchNumberInGroup: number;
+    /** 本次子批次的保存目标楼层（batchIndices 的最后一个） */
+    saveTargetIndex: number;
+    /** 该 group 在 groupKeys 中的顺序 */
+    groupOrder: number;
+}
+
+/**
+ * 将 updateGroups 按 group.batchSize 拆分为上下文子批次，按子批次索引对齐为 round。
+ *
+ * 对齐规则：取所有 group 的最大子批次数作为总 round 数。
+ * 如果某 group 的子批次数不够，后面的 round 不包含该 group。
+ *
+ * 示例：groupA 有 3 个子批次，groupB 有 1 个子批次 →
+ *   round[0] = [groupA_batch1, groupB_batch1]
+ *   round[1] = [groupA_batch2]
+ *   round[2] = [groupA_batch3]
+ */
+export function buildFillRoundsFromUpdateGroups_ACU(
+    updateGroups: Record<string, any>,
+    groupKeys: string[],
+): FillRoundItem_ACU[][] {
+    // 根对象防御：updateGroups 或 groupKeys 无效时直接返回空数组
+    if (!updateGroups || typeof updateGroups !== 'object' || !Array.isArray(groupKeys) || groupKeys.length === 0) {
+        return [];
+    }
+    // 1. 对每个 group 按 batchSize 拆分为子批次
+    const groupBatchesMap: Map<string, number[][]> = new Map();
+    let maxRounds = 0;
+    for (let gIdx = 0; gIdx < groupKeys.length; gIdx++) {
+        const gKey = groupKeys[gIdx];
+        const group = updateGroups[gKey];
+        if (!group || typeof group !== 'object') continue;
+        const rawIndices = group.indices;
+        if (!Array.isArray(rawIndices) || rawIndices.length === 0) continue;
+        const indices: number[] = rawIndices;
+        const rawBatchSize = group.batchSize;
+        const batchSize: number = Number.isFinite(rawBatchSize) && rawBatchSize >= 1 ? Math.floor(rawBatchSize) : 1;
+        const batches: number[][] = [];
+        for (let i = 0; i < indices.length; i += batchSize) {
+            batches.push(indices.slice(i, i + batchSize));
+        }
+        groupBatchesMap.set(gKey, batches);
+        if (batches.length > maxRounds) maxRounds = batches.length;
+    }
+
+    // 2. 按 roundIndex 对齐
+    const rounds: FillRoundItem_ACU[][] = [];
+    for (let roundIndex = 0; roundIndex < maxRounds; roundIndex++) {
+        const roundItems: FillRoundItem_ACU[] = [];
+        for (let gIdx = 0; gIdx < groupKeys.length; gIdx++) {
+            const gKey = groupKeys[gIdx];
+            const batches = groupBatchesMap.get(gKey);
+            if (!batches || roundIndex >= batches.length) continue;
+            const batchIndices = batches[roundIndex];
+            if (batchIndices.length === 0) continue;
+            roundItems.push({
+                groupKey: gKey,
+                group: updateGroups[gKey],
+                batchIndices,
+                batchNumberInGroup: roundIndex + 1,
+                saveTargetIndex: batchIndices[batchIndices.length - 1],
+                groupOrder: gIdx,
+            });
+        }
+        if (roundItems.length > 0) {
+            rounds.push(roundItems);
+        }
+    }
+
+    logDebug_ACU(`[Round Builder] ${groupKeys.length} groups → ${rounds.length} rounds, maxSubBatches=${maxRounds}`);
+    for (let r = 0; r < rounds.length; r++) {
+        const items = rounds[r];
+        logDebug_ACU(`  Round ${r + 1}: ${items.length} items — ${items.map(it => `${it.groupKey}[batch${it.batchNumberInGroup}:${it.batchIndices[0]}..${it.saveTargetIndex}]`).join(', ')}`);
+    }
+
+    return rounds;
+}
+
 // ═══ Task 2: 单次执行合并后的编辑 ═══
 
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
@@ -899,7 +994,7 @@ export async function processUpdatesBatch_ACU(
 
         const chatHistory = getChatArray_ACU();
         const isAutoUpdateMode = mode && mode.startsWith('auto');
-        const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+        const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled) || prepareAiCallOnly;
 
         for (let i = 0; i < batches.length; i++) {
             const batchIndices = batches[i];
@@ -1050,7 +1145,6 @@ export async function processUpdatesBatch_ACU(
         return { success: true, preparedAiCalls, deferredResponses, deferredCommits };
     } finally {
         _set_isAutoUpdatingCard_ACU(false);
-        _set_wasStoppedByUser_ACU(false);
     }
 }
 
@@ -1067,9 +1161,7 @@ export async function generateDeferredResponsesForPreparedCalls_ACU(
             phase: 'calling_ai',
             attempt: chunkOrder + 1,
             maxRetries: preparedCalls.length,
-            currentBatch: prepared.batchNumber || (chunkOrder + 1),
-            totalBatches: preparedCalls.length,
-            message: `第 ${chunkOrder + 1}/${preparedCalls.length} 组 AI 调用`,
+            message: `正在生成第 ${chunkOrder + 1}/${preparedCalls.length} 组 AI 响应...`,
         });
         const abortController = new AbortController();
         logDebug_ACU(`[Manual Two-Phase] Generating preparedCallId=${prepared.preparedCallId}, target=${prepared.targetMessageIndex}.`);
@@ -1126,6 +1218,55 @@ function unionStrings_ACU(...groups: Array<Array<string> | null | undefined>): s
         });
     });
     return Array.from(merged);
+}
+
+export interface RoundPersistenceTarget_ACU {
+    targetMessageIndex: number;
+    targetSheetKeys: string[];
+    updateGroupKeys: string[];
+    trackingSheetKeys: string[];
+}
+
+/**
+ * 将 round 内多 group 的修改按各自 saveTargetIndex 分桶。
+ *
+ * round 内 AI 响应仍然合并 apply 一次，但持久化必须回到每个 group 对应的楼层。
+ * 这里只记录实际修改过的 sheet，避免 updateGroupKeys 把未修改表误判为已更新。
+ */
+export function buildRoundPersistenceTargets_ACU(
+    roundItems: FillRoundItem_ACU[],
+    modifiedKeys: string[],
+): RoundPersistenceTarget_ACU[] {
+    if (!Array.isArray(roundItems) || roundItems.length === 0 || !Array.isArray(modifiedKeys) || modifiedKeys.length === 0) {
+        return [];
+    }
+
+    const modifiedKeySet = new Set(modifiedKeys.filter(key => typeof key === 'string' && key.length > 0));
+    const targetsByIndex = new Map<number, RoundPersistenceTarget_ACU>();
+
+    for (const item of roundItems) {
+        const targetMessageIndex = Number(item?.saveTargetIndex);
+        if (!Number.isFinite(targetMessageIndex) || targetMessageIndex < 0) continue;
+
+        const groupSheetKeys = Array.isArray(item?.group?.sheetKeys) ? item.group.sheetKeys : [];
+        const changedSheetKeys = groupSheetKeys.filter((sheetKey: any): sheetKey is string =>
+            typeof sheetKey === 'string' && modifiedKeySet.has(sheetKey),
+        );
+        if (changedSheetKeys.length === 0) continue;
+
+        const existing = targetsByIndex.get(targetMessageIndex) || {
+            targetMessageIndex,
+            targetSheetKeys: [],
+            updateGroupKeys: [],
+            trackingSheetKeys: [],
+        };
+        existing.targetSheetKeys = unionStrings_ACU(existing.targetSheetKeys, changedSheetKeys);
+        existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, changedSheetKeys);
+        existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, changedSheetKeys);
+        targetsByIndex.set(targetMessageIndex, existing);
+    }
+
+    return Array.from(targetsByIndex.values()).sort((a, b) => a.targetMessageIndex - b.targetMessageIndex);
 }
 
 function compareDeferredCommitOrder_ACU(a: DeferredCommitPayload_ACU, b: DeferredCommitPayload_ACU): number {
@@ -1352,34 +1493,66 @@ export async function orchestrateManualUpdate_ACU(
         _set_isAutoUpdatingCard_ACU(true);
         const failedGroups: Array<{ key: string; error?: string }> = [];
 
-        // 手动分组采用两阶段提交：同一 chunk 内只并发 AI 生成；parse/apply 和持久化提交串行合并。
-        // 不能让 processBatch/executeCardUpdateCore 各自保存，否则 currentJsonTableData_ACU、SQLite provider、
-        // persistTablesToChatMessage_ACU 会重新暴露同目标楼层的并发 read-modify-write 风险。
-        const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
-        for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-            const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-            const preparedCalls: PreparedAiCall_ACU[] = [];
 
-            for (let groupOffset = 0; groupOffset < chunkKeys.length; groupOffset++) {
-                const gKey = chunkKeys[groupOffset];
-                const group = updateGroups[gKey];
+        // ═══ Round 串行填表模型 ═══
+        // 每个 round 基于上一轮 apply+persist+refresh 后的快照准备 prompt。
+        // round 内多个 group 的 AI 请求可并发生成，但 round 间严格串行。
+        const rounds = buildFillRoundsFromUpdateGroups_ACU(updateGroups, groupKeys);
+        const totalRounds = rounds.length;
+        const maxApplyRetries = settings_ACU.tableMaxRetries || 3;
+        const SQL_RETRY_MARKER = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
+
+        for (let roundIndex = 0; roundIndex < rounds.length; roundIndex++) {
+            const roundItems = rounds[roundIndex];
+            const roundNumber = roundIndex + 1;
+
+            if (wasStoppedByUser_ACU) {
+                failedGroups.push({ key: roundItems[0].groupKey, error: '手动更新已终止。' });
+                break;
+            }
+
+            onProgress?.({
+                phase: 'preparing',
+                currentBatch: roundNumber,
+                totalBatches: totalRounds,
+                message: `正在准备第 ${roundNumber}/${totalRounds} 批手动填表（${roundItems.length} 组）...`,
+            });
+
+            // 收集本 round 涉及的 sheetKeys 并集
+            const roundSheetKeys: string[] = [];
+            for (const item of roundItems) {
+                const group = item.group;
+                if (Array.isArray(group.sheetKeys)) {
+                    for (const sk of group.sheetKeys) {
+                        if (!roundSheetKeys.includes(sk)) roundSheetKeys.push(sk);
+                    }
+                }
+            }
+
+            // ═══ Round 内：准备 AI 请求 ═══
+            // 关键：传入 item.batchIndices（当前子批次），batchSize = batchIndices.length（保证只生成一个 prepared call）
+            const preparedCalls: PreparedAiCall_ACU[] = [];
+            for (const item of roundItems) {
+                const group = item.group;
                 const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
                 const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
                 const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
                 const requestOptions = tableApiPreset ? { tableApiPreset } : null;
-                const prepareResult = await processBatch(group.indices, 'manual_independent', {
+
+                const prepareResult = await processBatch(item.batchIndices, 'manual_independent', {
                     targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
+                    batchSize: item.batchIndices.length, // 强制单子批次，避免 processUpdatesBatch_ACU 再拆分
                     requestOptions,
-                    groupKey: gKey,
-                    groupOrder: start + groupOffset,
+                    groupKey: item.groupKey,
+                    groupOrder: item.groupOrder,
                     prepareAiCallOnly: true,
                     deferApply: true,
                     deferPersistence: true,
                 });
+
                 if (!prepareResult.success) {
                     failedGroups.push({
-                        key: gKey,
+                        key: item.groupKey,
                         error: prepareResult.error || '手动更新分组准备 AI 请求失败。',
                     });
                     break;
@@ -1393,112 +1566,175 @@ export async function orchestrateManualUpdate_ACU(
                 break;
             }
 
-            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCalls, onProgress);
-            if (!generationResult.success) {
-                failedGroups.push({
-                    key: chunkKeys[0],
-                    error: generationResult.error || '手动更新分组 AI 生成失败。',
+            // ═══ Round 内：SQL 错误注入重试循环（作用域限定在本 round） ═══
+            let lastApplyError: string | null = null;
+            let applyResult: { success: boolean; beforeData: TableDataObject_ACU | null; afterData: TableDataObject_ACU | null; modifiedKeys: string[]; error?: string } | null = null;
+
+            for (let retryAttempt = 0; retryAttempt < maxApplyRetries; retryAttempt++) {
+                if (wasStoppedByUser_ACU) {
+                    failedGroups.push({ key: roundItems[0].groupKey, error: '手动更新已终止。' });
+                    break;
+                }
+
+                // SQL 错误注入
+                if (lastApplyError && isSqliteMode()) {
+                    for (const call of preparedCalls) {
+                        if (call.dynamicContent?.tableDataText) {
+                            const markerIndex = call.dynamicContent.tableDataText.indexOf(SQL_RETRY_MARKER);
+                            if (markerIndex !== -1) {
+                                call.dynamicContent.tableDataText = call.dynamicContent.tableDataText.substring(0, markerIndex);
+                            }
+                            call.dynamicContent.tableDataText += `${SQL_RETRY_MARKER}[SQL执行错误，请修正后重新输出]\n错误信息: ${lastApplyError}`;
+                        }
+                    }
+                }
+
+                // AI 生成（round 内组间并发，重试时带 SQL 错误注入）
+                const withRoundProgress = (event: CardUpdateProgressEvent) => onProgress?.({
+                    ...event,
+                    currentBatch: event.currentBatch ?? roundNumber,
+                    totalBatches: event.totalBatches ?? totalRounds,
                 });
+                const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCalls, withRoundProgress);
+                if (!generationResult.success) {
+                    failedGroups.push({
+                        key: roundItems[0].groupKey,
+                        error: generationResult.error || '手动更新分组 AI 生成失败。',
+                    });
+                    break;
+                }
+
+                // 提取并合并编辑内容
+                const allEditBlocks: string[] = [];
+                for (const resp of generationResult.responses) {
+                    const edits = extractEditsFromAiResponse_ACU(resp.aiResponse);
+                    if (edits) allEditBlocks.push(edits);
+                }
+                if (allEditBlocks.length === 0) {
+                    failedGroups.push({ key: roundItems[0].groupKey, error: '所有 AI 响应均未包含有效编辑内容。' });
+                    break;
+                }
+                const mergedEdits = mergeAiEditContents_ACU(allEditBlocks);
+
+                // 执行合并后的编辑
+                const retryLabel = retryAttempt > 0 ? `（第 ${retryAttempt + 1} 次尝试）` : '';
+                onProgress?.({ phase: 'parsing', currentBatch: roundNumber, totalBatches: totalRounds, message: `正在应用合并后的编辑...${retryLabel}` });
+                applyResult = await applyMergedEdits_ACU(mergedEdits, 'standard', roundSheetKeys);
+
+                if (applyResult.success) {
+                    break; // 成功，跳出重试循环
+                }
+
+                // 应用失败
+                lastApplyError = applyResult.error || '应用合并编辑失败';
+
+                // 非 SQL 模式或最后一次重试：直接记录失败
+                if (!isSqliteMode() || retryAttempt >= maxApplyRetries - 1) {
+                    failedGroups.push({ key: roundItems[0].groupKey, error: lastApplyError });
+                    logWarn_ACU(`[Manual] Round ${roundNumber} 合并编辑在 ${retryAttempt + 1} 次尝试后仍失败: ${lastApplyError}`);
+                    break;
+                }
+
+                // SQL 模式 + 仍有重试次数：注入错误信息，等待后重试
+                logWarn_ACU(`[Manual] Round ${roundNumber} 合并编辑第 ${retryAttempt + 1} 次尝试失败: ${lastApplyError}，将注入错误信息并重新生成`);
+                onProgress?.({
+                    phase: 'retry',
+                    attempt: retryAttempt + 1,
+                    maxRetries: maxApplyRetries,
+                    currentBatch: roundNumber,
+                    totalBatches: totalRounds,
+                    message: lastApplyError.substring(0, 50),
+                });
+
+                // 重试前刷新数据确保干净状态
+                try {
+                    await loadAllChatMessages_ACU();
+                    await refreshData();
+                } catch (refreshErr: any) {
+                    logWarn_ACU(`[Manual] 重试前数据刷新失败: ${refreshErr?.message}`);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+
+            // 重试循环结束后安全检查
+            if (!applyResult || !applyResult.success) {
+                if (failedGroups.length === 0) {
+                    failedGroups.push({ key: roundItems[0].groupKey, error: applyResult?.error || '应用合并编辑失败。' });
+                }
                 await loadAllChatMessages_ACU();
                 await refreshData();
                 break;
             }
 
-            // ═══ Task 3: 合并前置 — 从这里开始替换为新架构 ═══
-            // 收集所有组的 sheetKeys 并集
-            const allSheetKeys: string[] = [];
-            for (const gKey of chunkKeys) {
-                const group = updateGroups[gKey];
-                if (Array.isArray(group.sheetKeys)) {
-                    for (const sk of group.sheetKeys) {
-                        if (!allSheetKeys.includes(sk)) allSheetKeys.push(sk);
-                    }
-                }
-            }
-
-            // 提取所有 AI 响应的编辑内容并合并
-            const allEditBlocks: string[] = [];
-            for (const resp of generationResult.responses) {
-                const edits = extractEditsFromAiResponse_ACU(resp.aiResponse);
-                if (edits) allEditBlocks.push(edits);
-            }
-            if (allEditBlocks.length === 0) {
-                // 没有 AI 响应包含有效编辑
-                failedGroups.push({ key: chunkKeys[0], error: '所有 AI 响应均未包含有效编辑内容。' });
-                break;
-            }
-            const mergedEdits = mergeAiEditContents_ACU(allEditBlocks);
-
-            // 单次执行合并后的编辑
-            onProgress?.({ phase: 'parsing', message: '正在应用合并后的编辑...' });
-            const applyResult = await applyMergedEdits_ACU(mergedEdits, 'standard', allSheetKeys);
-            if (!applyResult.success) {
-                failedGroups.push({ key: chunkKeys[0], error: applyResult.error || '应用合并编辑失败。' });
-                break;
-            }
-
-            // ═══ Task 3 (续): 单次持久化 ═══
-            // primarySaveTargetIndex 声明提前到当前块顶部，供后续首次初始化和向量归档使用
-            let primarySaveTargetIndex = -1;
-            for (const gKey of chunkKeys) {
-                const group = updateGroups[gKey];
-                if (Array.isArray(group.indices) && group.indices.length > 0) {
-                    const last = group.indices[group.indices.length - 1];
-                    if (last > primarySaveTargetIndex) primarySaveTargetIndex = last;
-                }
-            }
-            if (primarySaveTargetIndex < 0) primarySaveTargetIndex = 0;
+            // ═══ Round 内：按 group 对应楼层分桶持久化 ═══
+            const persistenceTargets = buildRoundPersistenceTargets_ACU(roundItems, applyResult.modifiedKeys);
 
             if (failedGroups.length === 0) {
-                onProgress?.({ phase: 'saving', message: '正在保存合并后的更新到聊天记录...' });
+                onProgress?.({ phase: 'saving', currentBatch: roundNumber, totalBatches: totalRounds, message: '正在保存合并后的更新到聊天记录...' });
 
-                const saveResult = await persistTablesToChatMessage_ACU({
-                    targetMessageIndex: primarySaveTargetIndex,
-                    targetSheetKeys: applyResult.modifiedKeys,
-                    updateGroupKeys: allSheetKeys,
-                    trackingSheetKeys: applyResult.modifiedKeys,
-                    trackAsUpdate: true,
-                    beforeData: applyResult.beforeData,
-                    afterData: applyResult.afterData,
-                });
-                if (!saveResult.saved) {
-                    failedGroups.push({ key: chunkKeys[0], error: '无法将更新后的数据库保存到聊天记录。' });
+                if (persistenceTargets.length === 0) {
+                    failedGroups.push({ key: roundItems[0].groupKey, error: '合并编辑成功但没有可持久化的目标楼层。' });
                 }
 
-                // ═══ Task 3 (续): 首次初始化补全 + 向量索引归档 ═══
-                // [保持原有逻辑] 如果是首次初始化，需要补充模板中的其他表（未被 AI 修改的）
-                const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
-                if (isFirstTimeInit) {
-                    const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
-                    if (fullTemplate) {
-                        for (const sheetKey of allSheetKeys) {
-                            if (!applyResult.modifiedKeys.includes(sheetKey) && fullTemplate[sheetKey]) {
-                                (currentJsonTableData_ACU as any)[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
-                                logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data.`);
+                const savedTargetIndices: number[] = [];
+                for (const target of persistenceTargets) {
+                    const saveResult = await persistTablesToChatMessage_ACU({
+                        targetMessageIndex: target.targetMessageIndex,
+                        targetSheetKeys: target.targetSheetKeys,
+                        updateGroupKeys: target.updateGroupKeys,
+                        trackingSheetKeys: target.trackingSheetKeys,
+                        trackAsUpdate: true,
+                        beforeData: applyResult.beforeData,
+                        afterData: applyResult.afterData,
+                    });
+                    if (!saveResult.saved) {
+                        failedGroups.push({ key: roundItems[0].groupKey, error: `无法将目标楼层 ${target.targetMessageIndex} 的更新后数据库保存到聊天记录。` });
+                        break;
+                    }
+                    savedTargetIndices.push(target.targetMessageIndex);
+                }
+
+                if (failedGroups.length === 0) {
+                    // 首次初始化补全（仅第一个 round）
+                    if (roundIndex === 0) {
+                        const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
+                        if (isFirstTimeInit) {
+                            const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
+                            if (fullTemplate) {
+                                for (const sheetKey of roundSheetKeys) {
+                                    if (!applyResult.modifiedKeys.includes(sheetKey) && fullTemplate[sheetKey]) {
+                                        (currentJsonTableData_ACU as any)[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                        logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data.`);
+                                    }
+                                }
                             }
                         }
                     }
-                }
 
-                // [保持原有逻辑] 填表完成后强制应用编码索引列特殊锁定（AM序列）
-                applySpecialIndexSequenceToSummaryTables_ACU(currentJsonTableData_ACU);
+                    // 填表完成后强制应用编码索引列特殊锁定（AM序列）
+                    applySpecialIndexSequenceToSummaryTables_ACU(currentJsonTableData_ACU);
 
-                // [保持原有逻辑] 向量索引防抖归档（交火模式）
-                if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-                    enqueueSummaryVectorIndexFlush_ACU({
-                        targetMessageIndex: primarySaveTargetIndex,
-                        mode: 'sync',
-                        reason: 'table_fill_complete',
-                    }).then(result => {
-                        if (result.skipped) {
-                            logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}`);
+                    // 向量索引防抖归档（交火模式）
+                    if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                        for (const targetMessageIndex of savedTargetIndices) {
+                            enqueueSummaryVectorIndexFlush_ACU({
+                                targetMessageIndex,
+                                mode: 'sync',
+                                reason: 'table_fill_complete',
+                            }).then(result => {
+                                if (result.skipped) {
+                                    logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}`);
+                                }
+                            }).catch(err => {
+                                logWarn_ACU('[交火模式纪要索引] 填表完成后防抖归档入队异常:', err);
+                            });
                         }
-                    }).catch(err => {
-                        logWarn_ACU('[交火模式纪要索引] 填表完成后防抖归档入队异常:', err);
-                    });
+                    }
                 }
             }
 
+            // Round 完成后刷新数据，下一 round 基于新快照
             await loadAllChatMessages_ACU();
             await refreshData();
 
@@ -1506,6 +1742,7 @@ export async function orchestrateManualUpdate_ACU(
                 break;
             }
         }
+
 
         _set_isAutoUpdatingCard_ACU(false);
 

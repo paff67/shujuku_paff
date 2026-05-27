@@ -24,6 +24,31 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   getSortedSheetKeys_ACU: vi.fn((data: any) => data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')) : []),
 }));
 
+vi.mock('../../../src/service/table/update-orchestrator', async () => {
+  const actual = await vi.importActual<any>('../../../src/service/table/update-orchestrator');
+  return {
+    ...actual,
+    generateDeferredResponsesForPreparedCalls_ACU: vi.fn(async (preparedCalls: any[]) => ({
+      success: true,
+      responses: preparedCalls.map((call, index) => ({
+        aiResponse: `<tableEdit>${call?.targetSheetKeys?.[0] || `sheet_${index}`}</tableEdit>`,
+      })),
+    })),
+    extractEditsFromAiResponse_ACU: vi.fn((aiResponse: string) => aiResponse || '<tableEdit>sheet_0</tableEdit>'),
+    mergeAiEditContents_ACU: vi.fn((editBlocks: string[]) => editBlocks.join('\n')),
+    applyMergedEdits_ACU: vi.fn(async () => ({
+      success: true,
+      modifiedKeys: ['sheet_0', 'sheet_1'],
+      beforeData: {},
+      afterData: { sheet_0: { rows: [] }, sheet_1: { rows: [] } },
+    })),
+  };
+});
+
+vi.mock('../../../src/service/table/table-service', () => ({
+  persistTablesToChatMessage_ACU: vi.fn(async (options: any) => ({ saved: true, messageIndex: options?.targetMessageIndex })),
+}));
+
 import {
   buildAutoUpdatePlan_ACU,
   checkAutoUpdatePreConditions_ACU,
@@ -444,6 +469,15 @@ describe('executeAutoUpdatePlan_ACU', () => {
     maxConcurrentGroups: 2,
   };
 
+  function makePreparedAiCall(sheetKey = 'sheet_0') {
+    return {
+      targetSheetKeys: [sheetKey],
+      dynamicContent: {
+        tableDataText: '当前表格数据',
+      },
+    };
+  }
+
   const mockSetAutoUpdating = vi.fn();
 
   function makeOps(overrides: Partial<{
@@ -453,7 +487,12 @@ describe('executeAutoUpdatePlan_ACU', () => {
     purgeOldLayerData: any;
   }> = {}) {
     return {
-      processUpdates: overrides.processUpdates || vi.fn().mockResolvedValue(true),
+      processUpdates: overrides.processUpdates || vi.fn().mockImplementation(async (_indices: number[], _mode: string, options: any) => ({
+        success: true,
+        preparedAiCalls: [
+          makePreparedAiCall(options?.targetSheetKeys?.[0] || 'sheet_0'),
+        ],
+      })),
       refreshData: overrides.refreshData || vi.fn().mockResolvedValue(undefined),
       loadAllChatMessages: overrides.loadAllChatMessages || vi.fn().mockResolvedValue(undefined),
       purgeOldLayerData: overrides.purgeOldLayerData || vi.fn().mockResolvedValue(undefined),
@@ -499,8 +538,8 @@ describe('executeAutoUpdatePlan_ACU', () => {
       },
     };
     const mockProcess = vi.fn()
-      .mockResolvedValueOnce(true)   // group_a 成功
-      .mockResolvedValueOnce(false); // group_b 失败
+      .mockResolvedValueOnce({ success: true, preparedAiCalls: [makePreparedAiCall('sheet_0')] })
+      .mockResolvedValueOnce({ success: false });
 
     const ops = makeOps({ processUpdates: mockProcess });
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
@@ -521,6 +560,40 @@ describe('executeAutoUpdatePlan_ACU', () => {
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
     expect(result.success).toBe(false);
     expect(result.failedGroups).toBe(1);
+  });
+
+  it('持久化失败时不重新生成 AI 或重新 apply', async () => {
+    const orchestrator = await import('../../../src/service/table/update-orchestrator');
+    const tableService = await import('../../../src/service/table/table-service');
+    vi.mocked(tableService.persistTablesToChatMessage_ACU).mockResolvedValueOnce({
+      saved: false,
+      error: '保存失败',
+    });
+
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
+      },
+    };
+    const progressEvents: any[] = [];
+    const ops = makeOps();
+
+    const result = await executeAutoUpdatePlan_ACU(
+      plan,
+      { ...baseSettings, tableMaxRetries: 3 },
+      mockSetAutoUpdating,
+      ops,
+      event => progressEvents.push(event),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.failedGroups).toBe(1);
+    expect(ops.processUpdates).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(orchestrator.generateDeferredResponsesForPreparedCalls_ACU)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(orchestrator.applyMergedEdits_ACU)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(tableService.persistTablesToChatMessage_ACU)).toHaveBeenCalledTimes(1);
+    expect(progressEvents).toContainEqual(expect.objectContaining({ phase: 'error', message: '保存失败' }));
   });
 
   it('setAutoUpdating 被正确调用', async () => {

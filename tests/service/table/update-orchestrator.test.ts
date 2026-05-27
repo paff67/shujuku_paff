@@ -142,6 +142,7 @@ import {
   buildBatchMergeBase_ACU,
   processUpdatesBatch_ACU,
   executeCardUpdateCore_ACU,
+  buildRoundPersistenceTargets_ACU,
   orchestrateManualUpdate_ACU,
   type CardUpdateResult,
   type CardUpdateProgressEvent,
@@ -263,6 +264,107 @@ describe('resolveUpdateMode_ACU', () => {
 
   it('未知模式返回 auto_standard', () => {
     expect(resolveUpdateMode_ACU('unknown')).toBe('auto_standard');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// buildRoundPersistenceTargets_ACU
+// ═══════════════════════════════════════════════════════════════
+describe('buildRoundPersistenceTargets_ACU', () => {
+  it('按 round item 的 saveTargetIndex 将修改表分桶到对应楼层', () => {
+    const result = buildRoundPersistenceTargets_ACU([
+      {
+        groupKey: 'group_a',
+        group: { sheetKeys: ['sheet_0'] },
+        batchIndices: [1],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 1,
+        groupOrder: 0,
+      },
+      {
+        groupKey: 'group_b',
+        group: { sheetKeys: ['sheet_1'] },
+        batchIndices: [3],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 3,
+        groupOrder: 1,
+      },
+    ] as any, ['sheet_0', 'sheet_1']);
+
+    expect(result).toEqual([
+      {
+        targetMessageIndex: 1,
+        targetSheetKeys: ['sheet_0'],
+        updateGroupKeys: ['sheet_0'],
+        trackingSheetKeys: ['sheet_0'],
+      },
+      {
+        targetMessageIndex: 3,
+        targetSheetKeys: ['sheet_1'],
+        updateGroupKeys: ['sheet_1'],
+        trackingSheetKeys: ['sheet_1'],
+      },
+    ]);
+  });
+
+  it('同一 saveTargetIndex 的多个 group 合并为一次持久化目标并去重', () => {
+    const result = buildRoundPersistenceTargets_ACU([
+      {
+        groupKey: 'group_a',
+        group: { sheetKeys: ['sheet_0', 'sheet_1'] },
+        batchIndices: [5],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 5,
+        groupOrder: 0,
+      },
+      {
+        groupKey: 'group_b',
+        group: { sheetKeys: ['sheet_1', 'sheet_2'] },
+        batchIndices: [5],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 5,
+        groupOrder: 1,
+      },
+    ] as any, ['sheet_0', 'sheet_1', 'sheet_2']);
+
+    expect(result).toEqual([
+      {
+        targetMessageIndex: 5,
+        targetSheetKeys: ['sheet_0', 'sheet_1', 'sheet_2'],
+        updateGroupKeys: ['sheet_0', 'sheet_1', 'sheet_2'],
+        trackingSheetKeys: ['sheet_0', 'sheet_1', 'sheet_2'],
+      },
+    ]);
+  });
+
+  it('未实际修改的 group sheet 不生成持久化目标也不推进 tracking', () => {
+    const result = buildRoundPersistenceTargets_ACU([
+      {
+        groupKey: 'group_a',
+        group: { sheetKeys: ['sheet_0'] },
+        batchIndices: [1],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 1,
+        groupOrder: 0,
+      },
+      {
+        groupKey: 'group_b',
+        group: { sheetKeys: ['sheet_1'] },
+        batchIndices: [3],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 3,
+        groupOrder: 1,
+      },
+    ] as any, ['sheet_0']);
+
+    expect(result).toEqual([
+      {
+        targetMessageIndex: 1,
+        targetSheetKeys: ['sheet_0'],
+        updateGroupKeys: ['sheet_0'],
+        trackingSheetKeys: ['sheet_0'],
+      },
+    ]);
   });
 });
 
@@ -1118,14 +1220,36 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: false, mes: 'AI回复2' },
     ]);
 
-    mockProcessBatch.mockResolvedValue({ success: true });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
+    mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => ({
+      success: true,
+      preparedAiCalls: [{
+        preparedCallId: `${options.groupKey}:1:3`,
+        targetMessageIndex: 3,
+        batchNumber: 1,
+        updateMode: 'manual_independent',
+        targetSheetKeys: options.targetSheetKeys,
+        requestOptions: options.requestOptions,
+        dynamicContent: { tableDataText: 'prepared' },
+      }],
+    }));
+    const progressEvents: CardUpdateProgressEvent[] = [];
 
-    const result = await orchestrateManualUpdate_ACU(['sheet_0'], mockProcessBatch, mockRefreshData);
+    const result = await orchestrateManualUpdate_ACU(
+      ['sheet_0'],
+      mockProcessBatch,
+      mockRefreshData,
+      {},
+      (event: CardUpdateProgressEvent) => progressEvents.push(event),
+    );
     expect(result.success).toBe(true);
     expect(mockProcessBatch).toHaveBeenCalled();
+    const callingAiEvent = progressEvents.find(event => event.phase === 'calling_ai');
+    expect(callingAiEvent).toEqual(expect.objectContaining({ currentBatch: 1, totalBatches: 1 }));
   });
 
-  it('多分组手动填表采用两阶段提交：prepare/apply 串行，只有 raw AI generation 并发，最后按目标楼层单次合并提交', async () => {
+  it('多分组手动填表采用 round 合并应用：prepare 串行，raw AI generation 并发，最后按目标楼层合并提交', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
 
@@ -1163,6 +1287,11 @@ describe('orchestrateManualUpdate_ACU', () => {
         }
       });
     });
+    mockParseAndApplyTableEdits.mockImplementation(() => {
+      mockCurrentJsonTableData.sheet_0.content.push(['a']);
+      mockCurrentJsonTableData.sheet_1.content.push(['b']);
+      return { success: true, modifiedKeys: ['sheet_0', 'sheet_1'] };
+    });
 
     mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => {
       const sheetKey = options.targetSheetKeys[0];
@@ -1181,38 +1310,16 @@ describe('orchestrateManualUpdate_ACU', () => {
           }],
         };
       }
-
-      events.push(`apply:${sheetKey}:${options.deferredResponses?.[0]?.preparedCallId}:${options.requestOptions?.tableApiPreset}`);
-      return {
-        success: true,
-        deferredCommits: [{
-          targetMessageIndex: 3,
-          preparedCallId: options.deferredResponses[0].preparedCallId,
-          chunkOrder: options.deferredResponses[0].chunkOrder,
-          batchNumber: 1,
-          groupKey: options.groupKey,
-          groupOrder: options.groupOrder,
-          targetSheetKeys: options.targetSheetKeys,
-          updateGroupKeys: options.targetSheetKeys,
-          trackingSheetKeys: options.targetSheetKeys,
-          beforeData: { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id']] } },
-          afterData: sheetKey === 'sheet_0'
-            ? { sheet_0: { content: [['row_id'], ['a']] }, sheet_1: { content: [['row_id']] } }
-            : { sheet_0: { content: [['row_id'], ['a']] }, sheet_1: { content: [['row_id'], ['b']] } },
-          modifiedKeys: options.targetSheetKeys,
-        }],
-      };
+      throw new Error('round 合并应用不应再次调用 processBatch');
     });
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1'], mockProcessBatch, mockRefreshData);
 
     expect(result.success).toBe(true);
-    expect(mockProcessBatch).toHaveBeenCalledTimes(4);
-    expect(mockProcessBatch.mock.calls.map(call => ({ sheet: call[2].targetSheetKeys[0], prepare: !!call[2].prepareAiCallOnly, apply: !!call[2].deferredResponses }))).toEqual([
-      { sheet: 'sheet_0', prepare: true, apply: false },
-      { sheet: 'sheet_1', prepare: true, apply: false },
-      { sheet: 'sheet_0', prepare: false, apply: true },
-      { sheet: 'sheet_1', prepare: false, apply: true },
+    expect(mockProcessBatch).toHaveBeenCalledTimes(2);
+    expect(mockProcessBatch.mock.calls.map(call => ({ sheet: call[2].targetSheetKeys[0], prepare: !!call[2].prepareAiCallOnly }))).toEqual([
+      { sheet: 'sheet_0', prepare: true },
+      { sheet: 'sheet_1', prepare: true },
     ]);
     expect(events).toEqual([
       'prepare:sheet_0:preset-a',
@@ -1221,8 +1328,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       'ai:b:start:preset-b',
       'ai:a:end',
       'ai:b:end',
-      'apply:sheet_0:0|1,3|3:1:3:preset-a',
-      'apply:sheet_1:1|1,3|3:1:3:preset-b',
     ]);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -1273,9 +1378,6 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => {
       const sheetKey = options.targetSheetKeys[0];
-      if (sheetKey === 'sheet_2') {
-        throw new Error('后续 chunk 不应启动');
-      }
       if (options.prepareAiCallOnly) {
         events.push(`prepare:${sheetKey}`);
         return {
@@ -1300,16 +1402,18 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('AI响应中未找到完整有效的 <tableEdit> 标签');
-    expect(mockProcessBatch).toHaveBeenCalledTimes(2);
-    expect(mockProcessBatch.mock.calls.map(call => call[2].targetSheetKeys[0])).toEqual(['sheet_0', 'sheet_1']);
+    expect(mockProcessBatch).toHaveBeenCalledTimes(3);
+    expect(mockProcessBatch.mock.calls.map(call => call[2].targetSheetKeys[0])).toEqual(['sheet_0', 'sheet_1', 'sheet_2']);
     expect(events).not.toContain('apply:sheet_0');
     expect(events).not.toContain('apply:sheet_1');
-    expect(events).not.toContain('prepare:sheet_2');
+    expect(events).not.toContain('apply:sheet_2');
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     expect(events).toEqual([
       'prepare:sheet_0',
       'prepare:sheet_1',
+      'prepare:sheet_2',
       'ai:a',
+      'ai:b',
       'ai:b',
     ]);
   });
@@ -1339,9 +1443,12 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     const events: string[] = [];
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>ok</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({
+      success: false,
+      error: '分组B应用失败',
+    });
     mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => {
       const sheetKey = options.targetSheetKeys[0];
-      if (sheetKey === 'sheet_2') throw new Error('后续 chunk 不应启动');
       if (options.prepareAiCallOnly) {
         events.push(`prepare:${sheetKey}`);
         return {
@@ -1357,28 +1464,16 @@ describe('orchestrateManualUpdate_ACU', () => {
           }],
         };
       }
-      events.push(`apply:${sheetKey}`);
-      if (sheetKey === 'sheet_1') {
-        return { success: false, error: '分组B应用失败' };
-      }
-      return { success: true, deferredCommits: [{
-        targetMessageIndex: 3,
-        targetSheetKeys: options.targetSheetKeys,
-        updateGroupKeys: options.targetSheetKeys,
-        trackingSheetKeys: options.targetSheetKeys,
-        beforeData: { sheet_0: { content: [['row_id']] } },
-        afterData: { sheet_0: { content: [['row_id'], ['a']] } },
-        modifiedKeys: options.targetSheetKeys,
-      }] };
+      throw new Error('round 合并应用不应再次调用 processBatch');
     });
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1', 'sheet_2'], mockProcessBatch, mockRefreshData);
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('分组B应用失败');
-    expect(events).toEqual(['prepare:sheet_0', 'prepare:sheet_1', 'apply:sheet_0', 'apply:sheet_1']);
+    expect(events).toEqual(['prepare:sheet_0', 'prepare:sheet_1', 'prepare:sheet_2']);
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
-    expect(mockProcessBatch.mock.calls.map(call => call[2].targetSheetKeys[0])).toEqual(['sheet_0', 'sheet_1', 'sheet_0', 'sheet_1']);
+    expect(mockProcessBatch.mock.calls.map(call => call[2].targetSheetKeys[0])).toEqual(['sheet_0', 'sheet_1', 'sheet_2']);
   });
 
   it('预清空时只按选中表调用清理', async () => {
@@ -1393,7 +1488,20 @@ describe('orchestrateManualUpdate_ACU', () => {
       sheet_0: { name: '测试表A', updateConfig: {} },
       sheet_1: { name: '测试表B', updateConfig: {} },
     };
-    mockProcessBatch.mockResolvedValue({ success: true });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
+    mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => ({
+      success: true,
+      preparedAiCalls: [{
+        preparedCallId: `${options.groupKey}:1:3`,
+        targetMessageIndex: 3,
+        batchNumber: 1,
+        updateMode: 'manual_independent',
+        targetSheetKeys: options.targetSheetKeys,
+        requestOptions: options.requestOptions,
+        dynamicContent: { tableDataText: 'prepared' },
+      }],
+    }));
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], mockProcessBatch, mockRefreshData, { clearBeforeUpdate: true });
     expect(result.success).toBe(true);
@@ -1422,7 +1530,20 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: false, mes: 'AI回复' },
     ]);
 
-    mockProcessBatch.mockResolvedValue({ success: true });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
+    mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => ({
+      success: true,
+      preparedAiCalls: [{
+        preparedCallId: `${options.groupKey}:1:1`,
+        targetMessageIndex: 1,
+        batchNumber: 1,
+        updateMode: 'manual_independent',
+        targetSheetKeys: options.targetSheetKeys,
+        requestOptions: options.requestOptions,
+        dynamicContent: { tableDataText: 'prepared' },
+      }],
+    }));
 
     const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await import('../../../src/service/summary/merge-logic');
     vi.mocked(checkAutoMergeTrigger_ACU).mockReturnValue({ shouldTrigger: true, mergeCount: 5 });
@@ -1443,7 +1564,20 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: false, mes: 'AI回复' },
     ]);
 
-    mockProcessBatch.mockResolvedValue({ success: true });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
+    mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => ({
+      success: true,
+      preparedAiCalls: [{
+        preparedCallId: `${options.groupKey}:1:1`,
+        targetMessageIndex: 1,
+        batchNumber: 1,
+        updateMode: 'manual_independent',
+        targetSheetKeys: options.targetSheetKeys,
+        requestOptions: options.requestOptions,
+        dynamicContent: { tableDataText: 'prepared' },
+      }],
+    }));
 
     await orchestrateManualUpdate_ACU(['sheet_0'], mockProcessBatch, mockRefreshData);
 
@@ -1611,6 +1745,7 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
 
   function mockPresetTwoPhaseProcessBatch(): void {
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>ok</tableEdit>');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
     mockProcessBatch.mockImplementation(async (_indices: number[], _mode: string, options: any) => {
       if (options.prepareAiCallOnly) {
         return {
@@ -1626,10 +1761,7 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
           }],
         };
       }
-      return {
-        success: true,
-        deferredCommits: [],
-      };
+      throw new Error('round 合并应用不应再次调用 processBatch');
     });
   }
 
@@ -1670,18 +1802,13 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
 
     // 验证 processBatch 被调用时携带了 requestOptions.tableApiPreset
     const prepareOptions = mockProcessBatch.mock.calls[0][2];
-    const applyOptions = mockProcessBatch.mock.calls[1][2];
     expect(prepareOptions.requestOptions).toEqual({ tableApiPreset: 'special-preset' });
-    expect(applyOptions.requestOptions).toEqual({ tableApiPreset: 'special-preset' });
     expect(mockCallCustomOpenAI).toHaveBeenCalledWith(
       { tableDataText: 'prepared' },
       expect.any(AbortController),
       { tableApiPreset: 'special-preset' },
     );
-    expect(applyOptions.deferredResponses[0]).toEqual(expect.objectContaining({
-      preparedCallId: '0|1|3:1:1',
-      requestOptions: { tableApiPreset: 'special-preset' },
-    }));
+    expect(mockProcessBatch).toHaveBeenCalledTimes(1);
   });
 
   it('表无覆盖预设时，requestOptions 为 null', async () => {

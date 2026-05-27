@@ -9,7 +9,7 @@
  */
 
 import { SqliteEngine } from './sqlite-engine';
-import { generateDDL, generateInserts, resultToContent, parseDDLTableName, buildColumnNameMap, validateDDLAgainstHeaders } from './schema-mapper';
+import { generateDDL, generateInserts, resultToContent, parseDDLTableName, parseDDLColumnNames, buildColumnNameMap, validateDDLAgainstHeaders } from './schema-mapper';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 
@@ -197,9 +197,10 @@ export class SyncBridge {
     // 构建列名映射（英文 → 中文）
     const ddl = meta.sourceData?.ddl || this.engine.getTableDDL(tableName) || '';
     const { sqlToChinese } = buildColumnNameMap(ddl);
+    const fallbackColumns = ddl ? parseDDLColumnNames(ddl) : [];
 
     // 转换为 content
-    const content = resultToContent(queryResult.columns, queryResult.values, sqlToChinese);
+    const content = resultToContent(queryResult.columns, queryResult.values, sqlToChinese, fallbackColumns);
 
     return {
       uid: meta.uid,

@@ -253,8 +253,13 @@ export class SqlTableService implements ITableStorageProvider {
     this._ensureInitialized();
     this._ensureTablesFromTemplate();
 
-    // 去掉 HTML 注释标记（AI 可能在 <tableEdit> 中用 <!-- --> 包裹）
-    const cleaned = sqlStatements.replace(/<!--|-->/g, '').trim();
+    // 纵深防御：剥离 AI 思维链标签，防止上层提取失败时泄漏进 SQL 执行层
+    let cleaned = sqlStatements
+      .replace(/<thinking[^>]*>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<thought[^>]*>[\s\S]*?<\/thought>/gi, '')
+      .replace(/<\/?(?:thinking|thought)[^>]*>/gi, '')
+      .replace(/<!--|-->/g, '')
+      .trim();
     if (!cleaned) {
       return { success: true, modifiedKeys: [], appliedEdits: 0 };
     }

@@ -244,6 +244,33 @@ describe('SyncBridge', () => {
       expect(sheet.content[0]).toContain('物品名称'); // 中文表头还原
     });
 
+    it('空 SQLite 用户表导出时保留 DDL 推导出的完整表头', () => {
+      const originalData = makeTableData({
+        sheet_0: makeSheet({
+          content: [['row_id', '物品名称', '数量', '描述']],
+        }),
+      });
+      bridge.loadFromTableData(originalData);
+
+      const exported = bridge.exportToTableData(makeMate());
+      const sheetKeys = Object.keys(exported).filter(k => k.startsWith('sheet_'));
+      const sheet = exported[sheetKeys[0]] as Sheet_ACU;
+
+      expect(sheet.content).toEqual([['row_id', '物品名称', '数量', '描述']]);
+    });
+
+    it('运行时删除全部数据后导出仍保留 DDL 推导出的完整表头', () => {
+      const originalData = makeTableData({ sheet_0: makeSheet() });
+      bridge.loadFromTableData(originalData);
+      engine.run('DELETE FROM inventory;');
+
+      const exported = bridge.exportToTableData(makeMate());
+      const sheetKeys = Object.keys(exported).filter(k => k.startsWith('sheet_'));
+      const sheet = exported[sheetKeys[0]] as Sheet_ACU;
+
+      expect(sheet.content).toEqual([['row_id', '物品名称', '数量', '描述']]);
+    });
+
     it('导出后数据与原始数据一致', () => {
       const originalData = makeTableData({ sheet_0: makeSheet() });
       bridge.loadFromTableData(originalData);

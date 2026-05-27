@@ -174,17 +174,23 @@ export function generateInserts(sheet: Sheet_ACU, tableName?: string): string[] 
  * @param columns SQL 结果的列名数组
  * @param values SQL 结果的值数组
  * @param chineseHeaders 中文表头映射（列名 → 中文名），用于还原 content[0]
+ * @param fallbackColumns 当 SQL 引擎对空结果返回空列名时，用 DDL 解析出的列名恢复表头
  * @returns content 二维数组（第一行是表头，后续是数据行）
  */
 export function resultToContent(
   columns: string[],
   values: SqlJsValueType[][],
-  chineseHeaders?: Map<string, string>
+  chineseHeaders?: Map<string, string>,
+  fallbackColumns?: string[]
 ): (string | null)[][] {
-  if (columns.length === 0) return [['row_id']];
+  const effectiveColumns = Array.isArray(columns) && columns.length > 0
+    ? columns
+    : (Array.isArray(fallbackColumns) && fallbackColumns.length > 0 ? fallbackColumns : []);
+
+  if (effectiveColumns.length === 0) return [['row_id']];
 
   // 构建表头行：用中文名（如果有映射），否则用 SQL 列名
-  const headerRow: (string | null)[] = columns.map(col => {
+  const headerRow: (string | null)[] = effectiveColumns.map(col => {
     if (col === 'row_id') return 'row_id';
     return chineseHeaders?.get(col) || col;
   });

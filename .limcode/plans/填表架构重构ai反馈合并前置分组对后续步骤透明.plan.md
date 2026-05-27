@@ -5,7 +5,12 @@
 ## TODO LIST
 
 <!-- LIMCODE_TODO_LIST_START -->
-<!-- no todos -->
+- [x] 定义并实现批次执行帧构建逻辑：按 group.indices + group.batchSize 拆分为 round，round 内保留各 group 的上下文差异  `#step_1`
+- [x] 重构手动填表编排：每个 round 基于当前快照准备 prompt，round 内组并发生成，合并应用并持久化后刷新，再进入下一 round  `#step_2`
+- [x] 重构自动填表编排：保留自动表级参数产生的 updateGroups，同样按 round 串行执行并在 round 内并发不同组  `#step_3`
+- [x] 调整进度 toast 与 batch 计数语义：显示上下文批次 round 进度，避免把 preparedCall 数量误当批次总数  `#step_4`
+- [x] 保留并校正 SQL apply 失败重试：重试仅针对当前 round，注入错误后重新生成当前 round 响应，不跨批污染  `#step_5`
+- [x] 验证与回归：TypeScript 编译、bundle 构建、静态检查关键并发点，必要时补充测试或日志验证方案  `#step_6`
 <!-- LIMCODE_TODO_LIST_END -->
 
 # 填表架构重构：AI反馈合并前置

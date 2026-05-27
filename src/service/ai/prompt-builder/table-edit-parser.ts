@@ -15,6 +15,10 @@ import { getStorageProvider } from '../../table/table-storage-strategy';
   function normalizeAiResponseForTableEditParsing_ACU(text: string) {
     if (typeof text !== 'string') return '';
     let cleaned = text.trim();
+    // 剥离 AI 思维链标签（<thought>/<thinking> 块及孤立标签），防止泄漏进 SQL 执行层
+    cleaned = cleaned.replace(/<thinking[^>]*>[\s\S]*?<\/thinking>/gi, '');
+    cleaned = cleaned.replace(/<thought[^>]*>[\s\S]*?<\/thought>/gi, '');
+    cleaned = cleaned.replace(/<\/?(?:thinking|thought)[^>]*>/gi, '');
     cleaned = cleaned.replace(/'\s*\+\s*'/g, '');
     if (cleaned.startsWith("'") && cleaned.endsWith("'")) cleaned = cleaned.slice(1, -1);
     cleaned = cleaned.replace(/\\n/g, '\n');

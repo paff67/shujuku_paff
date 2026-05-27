@@ -311,6 +311,22 @@ describe('resultToContent', () => {
     expect(content).toEqual([['row_id']]);
   });
 
+  it('SQL 空结果未返回列名时使用 fallbackColumns 恢复完整表头', () => {
+    const chineseHeaders = new Map([['item_name', '物品名称'], ['quantity', '数量']]);
+    const content = resultToContent([], [], chineseHeaders, ['row_id', 'item_name', 'quantity']);
+    expect(content).toEqual([['row_id', '物品名称', '数量']]);
+  });
+
+  it('SQL 已返回列名时优先使用真实 columns 而不是 fallbackColumns', () => {
+    const chineseHeaders = new Map([['item_name', '物品名称'], ['quantity', '数量']]);
+    const content = resultToContent(['row_id', 'item_name'], [[1, '铁剑']], chineseHeaders, [
+      'row_id',
+      'item_name',
+      'quantity',
+    ]);
+    expect(content).toEqual([['row_id', '物品名称'], ['1', '铁剑']]);
+  });
+
   it('Uint8Array 值转为 [BLOB]', () => {
     const columns = ['row_id', 'data'];
     const values: any[][] = [[1, new Uint8Array([1, 2, 3])]];
