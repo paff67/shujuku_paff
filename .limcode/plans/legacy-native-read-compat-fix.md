@@ -1,13 +1,10 @@
 ## TODO LIST
 
 <!-- LIMCODE_TODO_LIST_START -->
-- [x] 构造真实样本驱动的旧 native 复现测试：根元数据 chat_metadata.sheets + AI 消息顶层 TavernDB_ACU_Data，确认当前读取链路在哪一层丢失数据  `#legacy_native_fix_1`
-- [x] 确认运行时聊天数组来源是否包含导入 JSONL 的消息级 TavernDB_ACU_Data，以及是否被 V2 checkpoint、模板 seed 或清理路径遮蔽  `#legacy_native_fix_2`
-- [x] 按复现结果实施最小兼容修复：优先修消息级 TavernDB_ACU_Data 读取/迁移链路；仅在无消息级数据时把 chat_metadata.sheets 转换作为保护性 fallback  `#legacy_native_fix_3`
-- [x] 补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行  `#legacy_native_fix_4`
-- [x] 运行定向 vitest、关键回归、tsc、rollup，并处理失败  `#legacy_native_fix_5`
-- [x] 调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界  `#legacy_native_fix_6`
-- [x] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7`
+- [x] 实施最小修复并补充回归测试  `#migration_sql_fix_3`
+- [x] 运行定向测试与构建验证  `#migration_sql_fix_4`
+- [x] 侦察迁移阶段触发SQL建表的调用链与触发条件  `#migration_sql_investigate_1`
+- [x] 侦察迁移后旧数据删除的调用链与触发条件  `#migration_sql_investigate_2`
 <!-- LIMCODE_TODO_LIST_END -->
 
 # 旧原生模式记录读取兼容修复计划

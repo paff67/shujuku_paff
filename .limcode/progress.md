@@ -1,6 +1,6 @@
 # 项目进度
 - Project: SP数据库
-- Updated At: 2026-05-27T11:40:29.182Z
+- Updated At: 2026-05-27T13:26:53.199Z
 - Status: completed
 - Phase: review
 
@@ -23,13 +23,10 @@
 ## 当前 TODO 快照
 
 <!-- LIMCODE_PROGRESS_TODOS_START -->
-- [x] 构造真实样本驱动的旧 native 复现测试：根元数据 chat_metadata.sheets + AI 消息顶层 TavernDB_ACU_Data，确认当前读取链路在哪一层丢失数据  `#legacy_native_fix_1`
-- [x] 确认运行时聊天数组来源是否包含导入 JSONL 的消息级 TavernDB_ACU_Data，以及是否被 V2 checkpoint、模板 seed 或清理路径遮蔽  `#legacy_native_fix_2`
-- [x] 按复现结果实施最小兼容修复：优先修消息级 TavernDB_ACU_Data 读取/迁移链路；仅在无消息级数据时把 chat_metadata.sheets 转换作为保护性 fallback  `#legacy_native_fix_3`
-- [x] 补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行  `#legacy_native_fix_4`
-- [x] 运行定向 vitest、关键回归、tsc、rollup，并处理失败  `#legacy_native_fix_5`
-- [x] 调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界  `#legacy_native_fix_6`
-- [x] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7`
+- [x] 实施最小修复并补充回归测试  `#migration_sql_fix_3`
+- [x] 运行定向测试与构建验证  `#migration_sql_fix_4`
+- [x] 侦察迁移阶段触发SQL建表的调用链与触发条件  `#migration_sql_investigate_1`
+- [x] 侦察迁移后旧数据删除的调用链与触发条件  `#migration_sql_investigate_2`
 <!-- LIMCODE_PROGRESS_TODOS_END -->
 
 ## 项目里程碑
@@ -47,7 +44,6 @@
 ## 最近更新
 
 <!-- LIMCODE_PROGRESS_LOG_START -->
-- 2026-05-23T10:38:02.497Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T10:42:29.104Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T11:05:44.935Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T11:08:07.197Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-snapshot-migration-refactor.md
@@ -67,6 +63,7 @@
 - 2026-05-27T10:57:03.897Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 - 2026-05-27T11:27:34.845Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 - 2026-05-27T11:40:29.182Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T13:26:53.199Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 <!-- LIMCODE_PROGRESS_LOG_END -->
 
 <!-- LIMCODE_PROGRESS_METADATA_START -->
@@ -76,7 +73,7 @@
   "projectId": "sp数据库",
   "projectName": "SP数据库",
   "createdAt": "2026-05-23T09:58:50.437Z",
-  "updatedAt": "2026-05-27T11:40:29.182Z",
+  "updatedAt": "2026-05-27T13:26:53.199Z",
   "status": "completed",
   "phase": "review",
   "currentFocus": "验收五项修复全部通过，round 串行快照模型健壮性修复完成",
@@ -89,50 +86,29 @@
   },
   "todos": [
     {
-      "id": "legacy_native_fix_1",
-      "content": "构造真实样本驱动的旧 native 复现测试：根元数据 chat_metadata.sheets + AI 消息顶层 TavernDB_ACU_Data，确认当前读取链路在哪一层丢失数据",
+      "id": "migration_sql_fix_3",
+      "content": "实施最小修复并补充回归测试",
       "status": "completed"
     },
     {
-      "id": "legacy_native_fix_2",
-      "content": "确认运行时聊天数组来源是否包含导入 JSONL 的消息级 TavernDB_ACU_Data，以及是否被 V2 checkpoint、模板 seed 或清理路径遮蔽",
+      "id": "migration_sql_fix_4",
+      "content": "运行定向测试与构建验证",
       "status": "completed"
     },
     {
-      "id": "legacy_native_fix_3",
-      "content": "按复现结果实施最小兼容修复：优先修消息级 TavernDB_ACU_Data 读取/迁移链路；仅在无消息级数据时把 chat_metadata.sheets 转换作为保护性 fallback",
+      "id": "migration_sql_investigate_1",
+      "content": "侦察迁移阶段触发SQL建表的调用链与触发条件",
       "status": "completed"
     },
     {
-      "id": "legacy_native_fix_4",
-      "content": "补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行",
-      "status": "completed"
-    },
-    {
-      "id": "legacy_native_fix_5",
-      "content": "运行定向 vitest、关键回归、tsc、rollup，并处理失败",
-      "status": "completed"
-    },
-    {
-      "id": "legacy_native_fix_6",
-      "content": "调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界",
-      "status": "completed"
-    },
-    {
-      "id": "legacy_native_fix_7",
-      "content": "验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布",
+      "id": "migration_sql_investigate_2",
+      "content": "侦察迁移后旧数据删除的调用链与触发条件",
       "status": "completed"
     }
   ],
   "milestones": [],
   "risks": [],
   "log": [
-    {
-      "at": "2026-05-23T10:38:02.497Z",
-      "type": "artifact_changed",
-      "refId": "plan",
-      "message": "同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md"
-    },
     {
       "at": "2026-05-23T10:42:29.104Z",
       "type": "artifact_changed",
@@ -246,21 +222,27 @@
       "type": "artifact_changed",
       "refId": "plan",
       "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T13:26:53.199Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
     }
   ],
   "stats": {
     "milestonesTotal": 0,
     "milestonesCompleted": 0,
-    "todosTotal": 7,
-    "todosCompleted": 7,
+    "todosTotal": 4,
+    "todosCompleted": 4,
     "todosInProgress": 0,
     "todosCancelled": 0,
     "activeRisks": 0
   },
   "render": {
     "rendererVersion": 1,
-    "generatedAt": "2026-05-27T11:40:29.182Z",
-    "bodyHash": "sha256:a79d17e6f9171d04a1538e3ba953423369860613d9390c0eb4c0a15551e14a18"
+    "generatedAt": "2026-05-27T13:26:53.199Z",
+    "bodyHash": "sha256:545906901c7b8175c9778a4789ceaf28e6afcfe23e23282ba87732759cd55113"
   }
 }
 <!-- LIMCODE_PROGRESS_METADATA_END -->

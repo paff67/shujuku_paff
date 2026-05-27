@@ -7267,12 +7267,6 @@ $CONTENT
                     migratedCheckpointMessageIndex = migrationResult.messageIndex;
                     migratedCheckpoint = cloneJson_ACU$4(migrationResult.checkpoint);
                     changed = true;
-                    for (let i = 0; i <= legacyBoundaryIndex; i++) {
-                        const message = chat[i];
-                        if (!message || message.is_user)
-                            continue;
-                        clearCurrentIsolationLegacyTableSnapshots_ACU(message, context.isolationKey, context.isolationConfig);
-                    }
                 }
             }
             catch (error) {
@@ -11386,9 +11380,8 @@ $CONTENT
                 // 可能在表结构/指导表合并后看起来像空壳，但它仍然代表历史快照，必须加载进 SQLite。
                 const mergeResult = await mergeAllIndependentTablesWithMeta_ACU();
                 const mergedData = mergeResult.data;
-                const hasAnyMergedSheet = !!mergedData && Object.keys(mergedData).some(k => k.startsWith('sheet_'));
                 // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
-                // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
+                // 还是仅仅是模板/历史快照恢复出的结构（只有表头没有数据行）。
                 // 空壳结构不应触发建表——用户可能还要改表结构。
                 // [修复] 同时排除来自基底状态消息的数据（seedGreeting 写入的模板初始数据），
                 // 这些数据虽然 content.length > 1（包含 seedRows），但不是 AI 真正填写的数据，
@@ -11404,8 +11397,10 @@ $CONTENT
                         return false;
                     return true;
                 });
-                const shouldLoadMigratedLegacySnapshot = mergeResult.usedLegacyMigration && hasAnyMergedSheet;
-                if (!mergedData || (!hasRealDataRows && !shouldLoadMigratedLegacySnapshot)) {
+                // legacy 迁移阶段只负责把历史快照转换到本地聊天层（V2/checkpoint + JSON视图），
+                // 不应在 loadFromChat 阶段触发 SQLite 建表；建表延迟到首次真实写操作。
+                const shouldSkipSqlLoadForLegacyMigration = !!mergeResult.usedLegacyMigration;
+                if (!mergedData || !hasRealDataRows || shouldSkipSqlLoadForLegacyMigration) {
                     // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
                     // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
                     // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
@@ -23784,6 +23779,9 @@ $CONTENT
         const historicalData = { mate: { type: 'chatSheets', version: 1 } };
         const encounteredKeys = [];
         const encounteredSet = new Set();
+        const hasSheetTables = (dataObj) => (!!dataObj
+            && typeof dataObj === 'object'
+            && Object.keys(dataObj).some(key => key.startsWith('sheet_')));
         const appendTables = (dataObj, { summaryOnly = null } = {}) => {
             if (!dataObj || typeof dataObj !== 'object' || Array.isArray(dataObj))
                 return;
@@ -23807,9 +23805,25 @@ $CONTENT
             const message = chat[i];
             if (!message || message.is_user)
                 continue;
-            // ── 只从 V2 隔离数据读取，不再扫描旧格式 ──
+            const isolationConfig = {
+                enabled: !!settings_ACU?.dataIsolationEnabled,
+                code: String(settings_ACU?.dataIsolationCode || ''),
+            };
+            // ── 优先读取 V2 隔离数据 ──
             const tagData = readIsolatedTagData_ACU(message, normalizedKey);
-            appendTables(tagData?.independentData);
+            const hasV2IndependentTables = hasSheetTables(tagData?.independentData);
+            if (hasV2IndependentTables) {
+                appendTables(tagData?.independentData);
+            }
+            // ── 兼容旧 native：仅当该消息没有有效 V2 sheet 数据时，回退读取旧格式 ──
+            if (!hasV2IndependentTables && isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
+                const legacyIndependent = readLegacyIndependentData_ACU(message);
+                appendTables(legacyIndependent, { summaryOnly: false });
+                const legacyStandard = readLegacyStandardData_ACU(message);
+                appendTables(legacyStandard, { summaryOnly: false });
+                // 历史模板 guide 只需要结构和参数，不需要把总结/大纲混入普通模板结构
+                // 总结/大纲在运行时合并链路中由历史数据重建保障
+            }
         }
         if (encounteredKeys.length === 0)
             return null;

@@ -564,6 +564,130 @@ describe('ensureChatSheetGuideSeeded_ACU', () => {
 
 // ═══ migrateLegacyTemplateScopeForCurrentChat_ACU ═══
 describe('migrateLegacyTemplateScopeForCurrentChat_ACU', () => {
+  it('仅旧格式历史数据时也能迁移出 legacy_history_frozen scope', async () => {
+    const { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, isLegacyMatchForIsolation_ACU } = await import('../../../src/data/repositories/chat-message-data-repo');
+
+    mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+    mockGetChatSheetGuideContainer.mockReturnValue({ version: 2, tags: {} });
+    mockBuildChatTemplateScopeStateFromCurrent.mockImplementation((payload: any) => ({
+      mode: 'chat_override',
+      isolationKey: payload?.isolationKey || '',
+      presetName: payload?.presetName || '',
+      templateStr: payload?.templateSource ? JSON.stringify(payload.templateSource) : '{}',
+      guideData: payload?.guideData || null,
+      source: payload?.source || '',
+      updatedAt: payload?.updatedAt || Date.now(),
+      originGlobalName: '',
+      originGlobalRevision: 0,
+    }));
+    mockSetCurrentChatTemplateScopeState.mockImplementation((state: any) => state);
+
+    const chat = [
+      { is_user: true, mes: '用户消息' },
+      { is_user: false, mes: '旧AI消息' },
+    ] as any[];
+    mockGetChatArray.mockReturnValue(chat);
+
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue({
+      sheet_legacy_0: {
+        uid: 'sheet_legacy_0',
+        name: '旧背包表',
+        content: [['row_id', '物品名'], ['1', '旧铁剑']],
+        orderNo: 3,
+      } as any,
+    });
+    vi.mocked(readLegacyStandardData_ACU).mockReturnValue(null);
+
+    const result = migrateLegacyTemplateScopeForCurrentChat_ACU();
+    expect(result).toBeTruthy();
+    expect(result?.source).toBe('legacy_history_frozen');
+    expect(result?.mode).toBe('chat_override');
+    expect(result?.guideData?.sheet_legacy_0).toBeDefined();
+    expect(result?.guideData?.sheet_legacy_0?.content?.[0]).toEqual(['row_id', '物品名']);
+  });
+
+  it('同一消息存在 V2 sheet 数据时优先使用 V2，不回退 legacy', async () => {
+    const { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } = await import('../../../src/data/repositories/chat-message-data-repo');
+
+    mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+    mockGetChatSheetGuideContainer.mockReturnValue({ version: 2, tags: {} });
+    mockBuildChatTemplateScopeStateFromCurrent.mockImplementation((payload: any) => ({
+      mode: 'chat_override',
+      isolationKey: payload?.isolationKey || '',
+      presetName: payload?.presetName || '',
+      templateStr: payload?.templateSource ? JSON.stringify(payload.templateSource) : '{}',
+      guideData: payload?.guideData || null,
+      source: payload?.source || '',
+      updatedAt: payload?.updatedAt || Date.now(),
+      originGlobalName: '',
+      originGlobalRevision: 0,
+    }));
+    mockSetCurrentChatTemplateScopeState.mockImplementation((state: any) => state);
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI消息' }] as any[]);
+
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue({
+      independentData: {
+        sheet_v2_0: {
+          uid: 'sheet_v2_0',
+          name: 'V2背包表',
+          content: [['row_id', 'V2字段']],
+          orderNo: 1,
+        },
+      },
+    } as any);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue({
+      sheet_legacy_0: {
+        uid: 'sheet_legacy_0',
+        name: '旧背包表',
+        content: [['row_id', '旧字段']],
+        orderNo: 0,
+      } as any,
+    });
+
+    const result = migrateLegacyTemplateScopeForCurrentChat_ACU();
+    expect(result?.guideData?.sheet_v2_0).toBeDefined();
+    expect(result?.guideData?.sheet_legacy_0).toBeUndefined();
+  });
+
+  it('V2 independentData 为空对象时允许回退 legacy 数据', async () => {
+    const { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, isLegacyMatchForIsolation_ACU } = await import('../../../src/data/repositories/chat-message-data-repo');
+
+    mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+    mockGetChatSheetGuideContainer.mockReturnValue({ version: 2, tags: {} });
+    mockBuildChatTemplateScopeStateFromCurrent.mockImplementation((payload: any) => ({
+      mode: 'chat_override',
+      isolationKey: payload?.isolationKey || '',
+      presetName: payload?.presetName || '',
+      templateStr: payload?.templateSource ? JSON.stringify(payload.templateSource) : '{}',
+      guideData: payload?.guideData || null,
+      source: payload?.source || '',
+      updatedAt: payload?.updatedAt || Date.now(),
+      originGlobalName: '',
+      originGlobalRevision: 0,
+    }));
+    mockSetCurrentChatTemplateScopeState.mockImplementation((state: any) => state);
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI消息' }] as any[]);
+
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue({ independentData: {} } as any);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue({
+      sheet_legacy_0: {
+        uid: 'sheet_legacy_0',
+        name: '旧背包表',
+        content: [['row_id', '物品名'], ['1', '旧铁剑']],
+        orderNo: 3,
+      } as any,
+    });
+    vi.mocked(readLegacyStandardData_ACU).mockReturnValue(null);
+
+    const result = migrateLegacyTemplateScopeForCurrentChat_ACU();
+    expect(result?.source).toBe('legacy_history_frozen');
+    expect(result?.guideData?.sheet_legacy_0).toBeDefined();
+  });
+
   it('已有 scoped state 时直接返回', () => {
     const existingState = { mode: 'chat_override', templateStr: '{}' };
     mockGetCurrentChatTemplateScopeState.mockReturnValue(existingState);
@@ -577,5 +701,54 @@ describe('migrateLegacyTemplateScopeForCurrentChat_ACU', () => {
     mockGetChatArray.mockReturnValue([]);
     const result = migrateLegacyTemplateScopeForCurrentChat_ACU();
     expect(result).toBeNull();
+  });
+
+  it('旧格式消息不匹配当前隔离时不迁移 legacy 数据', async () => {
+    const { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } = await import('../../../src/data/repositories/chat-message-data-repo');
+
+    mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+    mockGetChatSheetGuideContainer.mockReturnValue({ version: 2, tags: {} });
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI消息' }] as any[]);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(false);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue({
+      sheet_wrong_tag: { uid: 'sheet_wrong_tag', name: '错误标签表', content: [['row_id']] } as any,
+    });
+
+    const result = migrateLegacyTemplateScopeForCurrentChat_ACU();
+    expect(result).toBeNull();
+    expect(readLegacyIndependentData_ACU).not.toHaveBeenCalled();
+  });
+
+  it('legacy standard fallback 仅迁移普通表并过滤总结/大纲', async () => {
+    const { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, isLegacyMatchForIsolation_ACU } = await import('../../../src/data/repositories/chat-message-data-repo');
+    const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
+
+    mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+    mockGetChatSheetGuideContainer.mockReturnValue({ version: 2, tags: {} });
+    mockBuildChatTemplateScopeStateFromCurrent.mockImplementation((payload: any) => ({
+      mode: 'chat_override',
+      isolationKey: payload?.isolationKey || '',
+      guideData: payload?.guideData || null,
+      source: payload?.source || '',
+      updatedAt: payload?.updatedAt || Date.now(),
+    }));
+    mockSetCurrentChatTemplateScopeState.mockImplementation((state: any) => state);
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI消息' }] as any[]);
+
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue(null);
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: string) => name === '总结表' || name === '总体大纲');
+    vi.mocked(readLegacyStandardData_ACU).mockReturnValue({
+      sheet_normal: { uid: 'sheet_normal', name: '角色表', content: [['row_id', '姓名']] } as any,
+      sheet_summary: { uid: 'sheet_summary', name: '总结表', content: [['row_id', '总结']] } as any,
+      sheet_outline: { uid: 'sheet_outline', name: '总体大纲', content: [['row_id', '大纲']] } as any,
+    } as any);
+
+    const result = migrateLegacyTemplateScopeForCurrentChat_ACU();
+    expect(result?.guideData?.sheet_normal).toBeDefined();
+    expect(result?.guideData?.sheet_summary).toBeUndefined();
+    expect(result?.guideData?.sheet_outline).toBeUndefined();
   });
 });

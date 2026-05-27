@@ -69,10 +69,9 @@ export class SqlTableService implements ITableStorageProvider {
       // 可能在表结构/指导表合并后看起来像空壳，但它仍然代表历史快照，必须加载进 SQLite。
       const mergeResult = await mergeAllIndependentTablesWithMeta_ACU();
       const mergedData = mergeResult.data;
-      const hasAnyMergedSheet = !!mergedData && Object.keys(mergedData).some(k => k.startsWith('sheet_'));
 
       // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
-      // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
+      // 还是仅仅是模板/历史快照恢复出的结构（只有表头没有数据行）。
       // 空壳结构不应触发建表——用户可能还要改表结构。
       // [修复] 同时排除来自基底状态消息的数据（seedGreeting 写入的模板初始数据），
       // 这些数据虽然 content.length > 1（包含 seedRows），但不是 AI 真正填写的数据，
@@ -86,9 +85,11 @@ export class SqlTableService implements ITableStorageProvider {
           if (sheet._acu_from_base_state) return false;
           return true;
         });
-      const shouldLoadMigratedLegacySnapshot = mergeResult.usedLegacyMigration && hasAnyMergedSheet;
+      // legacy 迁移阶段只负责把历史快照转换到本地聊天层（V2/checkpoint + JSON视图），
+      // 不应在 loadFromChat 阶段触发 SQLite 建表；建表延迟到首次真实写操作。
+      const shouldSkipSqlLoadForLegacyMigration = !!mergeResult.usedLegacyMigration;
 
-      if (!mergedData || (!hasRealDataRows && !shouldLoadMigratedLegacySnapshot)) {
+      if (!mergedData || !hasRealDataRows || shouldSkipSqlLoadForLegacyMigration) {
         // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
         // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
         // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构

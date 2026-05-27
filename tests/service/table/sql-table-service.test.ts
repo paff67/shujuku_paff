@@ -387,7 +387,7 @@ describe('SqlTableService', () => {
       expect(result.source).toBe('merged');
     });
 
-    it('legacy migration 结果即使只有表头也应加载 SQLite，避免旧聊天被显示为空', async () => {
+    it('legacy migration 结果即使只有表头也不应在加载阶段建表，且应保留 JSON 视图', async () => {
       const migratedLegacyHeaderOnlyData = JSON.parse(JSON.stringify({
         ...testTableData,
         sheet_0: {
@@ -404,17 +404,13 @@ describe('SqlTableService', () => {
 
       const result = await service.loadFromChat();
 
-      expect(result.loaded).toBe(true);
-      expect(result.source).toBe('merged');
-      const queryResult = service.executeQuery('SELECT * FROM inventory');
-      expect(queryResult.rowCount).toBe(0);
-      const schemaResult = service.executeQuery('PRAGMA table_info(inventory)');
-      const schemaColumnNames = schemaResult.values.map(row => row[1]);
-      expect(schemaColumnNames).toContain('item_name');
-      expect(schemaColumnNames).toContain('quantity');
+      expect(result.loaded).toBe(false);
+      expect(result.source).toBe('empty');
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
     });
 
-    it('样本风格 legacy migration 多表数据应导入 SQLite 并保留 summary/outline 历史行', async () => {
+    it('样本风格 legacy migration 多表数据在加载阶段不导入 SQLite，但应保留 JSON 历史行视图', async () => {
       const migratedLegacySampleData = {
         mate: {
           type: 'acu',
@@ -529,25 +525,11 @@ describe('SqlTableService', () => {
 
       const result = await service.loadFromChat();
 
-      expect(result.loaded).toBe(true);
-      expect(result.source).toBe('merged');
-      expect(service.executeQuery('SELECT location, scene_time FROM global_state').values[0]).toEqual([
-        '老旧公寓楼三楼家门口',
-        '20XX-09-25 14:30',
-      ]);
-      expect(service.executeQuery('SELECT character_name, history FROM protagonist_profile').values[0]).toEqual([
-        '陈默',
-        '因保护妻子入狱三年，刚出狱回家。',
-      ]);
-      expect(service.executeQuery('SELECT time_span, summary, code_index FROM summary_log').values[0]).toEqual([
-        '20XX-09-25 午后',
-        '陈默出狱回到家门口，犹豫如何面对苏婉。',
-        'AM01',
-      ]);
-      expect(service.executeQuery('SELECT outline, code_index FROM outline_log').values[0]).toEqual([
-        '陈默出狱回家，面对熟悉旧居与未知妻子。',
-        'AM01',
-      ]);
+      expect(result.loaded).toBe(false);
+      expect(result.source).toBe('empty');
+      expect(mockCurrentJsonTableData.sheet_dCudvUnH.content[1]).toEqual(['1', '老旧公寓楼三楼家门口', '20XX-09-25 14:30']);
+      expect(mockCurrentJsonTableData.sheet_DpKcVGqg.content[1]).toEqual(['1', '陈默', '男/30岁', '因保护妻子入狱三年，刚出狱回家。']);
+      expect(() => service.executeQuery('SELECT location, scene_time FROM global_state')).toThrow();
     });
 
     it('加载后可以执行查询', async () => {

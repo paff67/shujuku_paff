@@ -200,7 +200,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
-  it('无 V2 但存在 legacy 快照时懒迁移为首个 AI 消息 checkpoint 并清理 legacy 源', () => {
+  it('无 V2 但存在 legacy 快照时懒迁移为首个 AI 消息 checkpoint 且保留 legacy 源', () => {
     const chat: any[] = [
       {
         is_user: false,
@@ -224,9 +224,9 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.kind).toBe('checkpoint');
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
-    expect(chat[0].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[0].TavernDB_ACU_ModifiedKeys).toBeUndefined();
-    expect(chat[0].TavernDB_ACU_UpdateGroupKeys).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
+    expect(chat[0].TavernDB_ACU_ModifiedKeys).toEqual(['sheet_0']);
+    expect(chat[0].TavernDB_ACU_UpdateGroupKeys).toEqual(['sheet_0']);
   });
 
   it('只有 V2 delta 没有 checkpoint 时先从 legacy 迁移到首楼 checkpoint 再回放 delta', () => {
@@ -248,7 +248,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(result.checkpoint?.messageIndexHint).toBe(0);
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
-    expect(chat[0].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
     expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
       ['row_id', '名称'],
       ['2', '木盾'],
@@ -256,7 +256,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
-  it('legacy 快照不在首楼时迁移到首个 AI 消息 checkpoint 并清理原 legacy 源', () => {
+  it('legacy 快照不在首楼时迁移到首个 AI 消息 checkpoint 且保留原 legacy 源', () => {
     const chat: any[] = [
       aiMessage(),
       { is_user: true },
@@ -280,8 +280,8 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
       ['1', '后置旧快照'],
     ]);
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
-    expect(chat[2].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_ModifiedKeys).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
+    expect(chat[2].TavernDB_ACU_ModifiedKeys).toEqual(['sheet_0']);
   });
 
   it('legacy 数据层超过保留数量时迁移到最早保留层 checkpoint', () => {
@@ -319,9 +319,9 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
     expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
     expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(2);
-    expect(chat[1].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[3].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
+    expect(chat[2].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
+    expect(chat[3].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
   });
 
   it('legacy 数据层未超过保留数量时仍迁移到首个 AI 消息 checkpoint', () => {
@@ -351,8 +351,8 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(result.checkpointMessageIndex).toBe(0);
     expect(result.checkpoint?.messageIndexHint).toBe(0);
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
-    expect(chat[1].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
+    expect(chat[2].TavernDB_ACU_IndependentData?.sheet_0).toBeDefined();
   });
 
   it('已有 V2 checkpoint 时不再用更早 legacy 快照污染 V2 链', () => {
@@ -402,7 +402,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
       ['row_id', '名称'],
       ['1', '旧聊天铁剑'],
     ]);
-    expect(chat[1].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_Data?.sheet_0).toBeDefined();
   });
 
   it('有效 V2 checkpoint 仍保持最高优先级，不被后续 legacy 快照覆盖', () => {
@@ -478,7 +478,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
       ['row_id', '名称'],
       ['1', '旧聊天铁剑'],
     ]);
-    expect(chat[0].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_Data?.sheet_0).toBeDefined();
   });
 
   it('只有根 chat_metadata.sheets 且无消息级数据时，fallback 只生成表头 checkpoint', () => {
@@ -705,7 +705,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(migratedData.sheet_DpKcVGqg.content[1][1]).toBe('陈默');
     expect(migratedData.sheet_3NoMc1wI.content[1][3]).toBe('AM01');
     expect(migratedData.sheet_PfzcX5v2.content[1][2]).toBe('AM01');
-    expect(chat[2].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_Data?.sheet_dCudvUnH).toBeDefined();
     expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data.sheet_vxHmOjru).toBeUndefined();
   });
 

@@ -9,7 +9,6 @@ import {
   resolveLegacyCheckpointAnchorMessageIndex_ACU,
 } from './table-delta-migration';
 import {
-  clearCurrentIsolationLegacyTableSnapshots_ACU,
   readTablePersistenceLayerV2_ACU,
   writeTablePersistenceLayerV2_ACU,
 } from './table-delta-repository';
@@ -289,16 +288,6 @@ export function reconstructTablesFromChatDeltas_ACU(
         migratedCheckpointMessageIndex = migrationResult.messageIndex;
         migratedCheckpoint = cloneJson_ACU(migrationResult.checkpoint);
         changed = true;
-
-        for (let i = 0; i <= legacyBoundaryIndex; i++) {
-          const message = chat[i];
-          if (!message || message.is_user) continue;
-          clearCurrentIsolationLegacyTableSnapshots_ACU(
-            message,
-            context.isolationKey,
-            context.isolationConfig,
-          );
-        }
       }
     } catch (error) {
       logWarn_ACU('[TableDeltaMigration] Failed to write legacy root checkpoint:', error);
