@@ -317,12 +317,13 @@ describe('migrateContentNullToRowId', () => {
 // ═══════════════════════════════════════════════════════════════
 // mergeAllIndependentTables_ACU 核心数据合并测试
 // ═══════════════════════════════════════════════════════════════
-import { mergeAllIndependentTables_ACU } from '../../../src/service/runtime/helpers-data-merge';
+import { mergeAllIndependentTables_ACU, mergeAllIndependentTablesWithMeta_ACU } from '../../../src/service/runtime/helpers-data-merge';
 import { getChatArray_ACU } from '../../../src/data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU } from '../../../src/service/runtime/state-manager';
-import { readIsolatedTagData_ACU, isLegacyMatchForIsolation_ACU, readLegacyIndependentData_ACU } from '../../../src/data/repositories/chat-message-data-repo';
+import { readIsolatedTagData_ACU, isLegacyMatchForIsolation_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU } from '../../../src/data/repositories/chat-message-data-repo';
 import { writeTablePersistenceLayerV2_ACU, clearCurrentIsolationLegacyTableSnapshots_ACU } from '../../../src/service/table/table-delta-repository';
 import { getChatSheetGuideDataForIsolationKey_ACU, getTemplateSheetKeys_ACU, getSortedSheetKeys_ACU, reorderDataBySheetKeys_ACU, materializeDataFromSheetGuide_ACU } from '../../../src/service/template/chat-scope';
+import { isSummaryOrOutlineTable_ACU } from '../../../src/shared/utils';
 
 describe('mergeAllIndependentTables_ACU', () => {
   beforeEach(() => {
@@ -526,6 +527,87 @@ describe('mergeAllIndependentTables_ACU', () => {
     const result = await mergeAllIndependentTables_ACU();
     expect(result).not.toBeNull();
     expect(result!.sheet_0.content[1][1]).toBe('旧版铁剑');
+  });
+
+  it('运行时 helper 从消息级 TavernDB_ACU_Data 迁移样本风格旧 native 数据并保留 summary/outline', async () => {
+    const metadataSheetKeys = ['sheet_vxHmOjru', 'sheet_ZCsAnd6o', 'sheet_e8Uv1Zd7', 'sheet_sc7EcAj0'];
+    const legacyStandardData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_dCudvUnH: {
+        uid: 'sheet_dCudvUnH',
+        name: '全局数据表',
+        orderNo: 0,
+        content: [
+          [null, '主角当前所在地点', '当前时间'],
+          [null, '老旧公寓楼三楼家门口', '20XX-09-25 14:30'],
+        ],
+      },
+      sheet_DpKcVGqg: {
+        uid: 'sheet_DpKcVGqg',
+        name: '主角信息',
+        orderNo: 1,
+        content: [
+          [null, '人物名称', '性别/年龄', '过往经历'],
+          [null, '陈默', '男/30岁', '因保护妻子入狱三年，刚出狱回家。'],
+        ],
+      },
+      sheet_3NoMc1wI: {
+        uid: 'sheet_3NoMc1wI',
+        name: '总结表',
+        orderNo: 6,
+        content: [
+          [null, '时间跨度', '纪要', '编码索引'],
+          [null, '20XX-09-25 午后', '陈默出狱回到家门口，犹豫如何面对苏婉。', 'AM01'],
+        ],
+      },
+      sheet_PfzcX5v2: {
+        uid: 'sheet_PfzcX5v2',
+        name: '总体大纲',
+        orderNo: 7,
+        content: [
+          [null, '大纲', '编码索引'],
+          [null, '陈默出狱回家，面对熟悉旧居与未知妻子。', 'AM01'],
+        ],
+      },
+    };
+    const chat: any[] = [
+      {
+        is_user: true,
+        chat_metadata: {
+          sheets: metadataSheetKeys.map(uid => ({ uid, name: `metadata-${uid}`, hashSheet: [], cellHistory: [] })),
+        },
+      },
+      { is_user: true, mes: '敲门' },
+      {
+        is_user: false,
+        mes: 'AI回复',
+        TavernDB_ACU_Data: legacyStandardData,
+        TavernDB_ACU_ModifiedKeys: ['sheet_dCudvUnH', 'sheet_DpKcVGqg', 'sheet_3NoMc1wI', 'sheet_PfzcX5v2'],
+        TavernDB_ACU_UpdateGroupKeys: ['sheet_dCudvUnH', 'sheet_DpKcVGqg'],
+      },
+    ];
+
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    vi.mocked(getTemplateSheetKeys_ACU).mockReturnValue(metadataSheetKeys);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue(null);
+    vi.mocked(readLegacyStandardData_ACU).mockImplementation((message: any) => message?.TavernDB_ACU_Data ?? null);
+    vi.mocked(readLegacySummaryData_ACU).mockReturnValue(null);
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: string) => name === '总结表' || name === '总体大纲');
+
+    const result = await mergeAllIndependentTablesWithMeta_ACU();
+
+    expect(result.usedLegacyMigration).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.foundSheetCount).toBe(4);
+    expect(result.checkpointMessageIndex).toBe(2);
+    expect(result.data?.sheet_dCudvUnH.content[1]).toEqual(['1', '老旧公寓楼三楼家门口', '20XX-09-25 14:30']);
+    expect(result.data?.sheet_DpKcVGqg.content[1][1]).toBe('陈默');
+    expect(result.data?.sheet_3NoMc1wI.content[1][3]).toBe('AM01');
+    expect(result.data?.sheet_PfzcX5v2.content[1][2]).toBe('AM01');
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data.sheet_3NoMc1wI.content[1][3]).toBe('AM01');
+    expect(saveChatToHost_ACU).toHaveBeenCalledTimes(1);
   });
 
   // ═══ updateConfig 兼容迁移 ═══

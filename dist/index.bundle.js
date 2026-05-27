@@ -6672,6 +6672,105 @@ $CONTENT
             },
         };
     }
+    function createDefaultSourceData_ACU() {
+        return { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' };
+    }
+    function createDefaultUpdateConfig_ACU() {
+        return { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 };
+    }
+    function createDefaultExportConfig_ACU() {
+        return {
+            enabled: false,
+            splitByRow: false,
+            entryName: '',
+            entryType: '',
+            keywords: '',
+            preventRecursion: false,
+            injectionTemplate: '',
+            extraIndexEnabled: false,
+            extraIndexEntryName: '',
+            extraIndexColumns: [],
+            extraIndexColumnModes: {},
+            extraIndexInjectionTemplate: '',
+            entryPlacement: { position: '', depth: 0, order: 0 },
+            extraIndexPlacement: { position: '', depth: 0, order: 0 },
+            fixedEntryPlacement: { position: '', depth: 0, order: 0 },
+            fixedIndexPlacement: { position: '', depth: 0, order: 0 },
+        };
+    }
+    function asRecord_ACU(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value)
+            ? value
+            : null;
+    }
+    function readString_ACU(value) {
+        return typeof value === 'string' ? value : '';
+    }
+    function extractMetadataHeaderRow_ACU(metadataSheet) {
+        const cellHistory = Array.isArray(metadataSheet.cellHistory) ? metadataSheet.cellHistory : [];
+        const headerByUid = new Map();
+        const headersByHistoryOrder = [];
+        cellHistory.forEach(cell => {
+            const record = asRecord_ACU(cell);
+            if (!record || record.type !== 'column_header')
+                return;
+            const value = readString_ACU(asRecord_ACU(record.data)?.value).trim();
+            if (!value)
+                return;
+            if (typeof record.uid === 'string')
+                headerByUid.set(record.uid, value);
+            headersByHistoryOrder.push(value);
+        });
+        const hashSheet = Array.isArray(metadataSheet.hashSheet) ? metadataSheet.hashSheet : [];
+        const firstHashRow = Array.isArray(hashSheet[0]) ? hashSheet[0] : [];
+        const headersByHashOrder = firstHashRow
+            .map(cellUid => typeof cellUid === 'string' ? headerByUid.get(cellUid) : undefined)
+            .filter((header) => !!header);
+        const headers = headersByHashOrder.length > 0 ? headersByHashOrder : headersByHistoryOrder;
+        return ['row_id', ...headers];
+    }
+    function extractMetadataSourceData_ACU(metadataSheet) {
+        const cellHistory = Array.isArray(metadataSheet.cellHistory) ? metadataSheet.cellHistory : [];
+        const sourceCell = cellHistory
+            .map(cell => asRecord_ACU(cell))
+            .find(cell => cell?.type === 'sheet_origin');
+        const source = asRecord_ACU(sourceCell?.data);
+        return {
+            ...createDefaultSourceData_ACU(),
+            note: readString_ACU(source?.note),
+            initNode: readString_ACU(source?.initNode),
+            deleteNode: readString_ACU(source?.deleteNode),
+            updateNode: readString_ACU(source?.updateNode),
+            insertNode: readString_ACU(source?.insertNode),
+        };
+    }
+    function convertChatMetadataSheetsToTableData_ACU(metadataSheets) {
+        if (!Array.isArray(metadataSheets))
+            return null;
+        const data = createEmptyTableData_ACU();
+        let orderNo = 0;
+        metadataSheets.forEach(metadataSheetValue => {
+            const metadataSheet = asRecord_ACU(metadataSheetValue);
+            const uid = readString_ACU(metadataSheet?.uid);
+            const name = readString_ACU(metadataSheet?.name);
+            if (!metadataSheet || !uid.startsWith('sheet_') || !name)
+                return;
+            const headerRow = extractMetadataHeaderRow_ACU(metadataSheet);
+            if (headerRow.length <= 1)
+                return;
+            data[uid] = {
+                uid,
+                name,
+                sourceData: extractMetadataSourceData_ACU(metadataSheet),
+                content: [headerRow],
+                updateConfig: createDefaultUpdateConfig_ACU(),
+                exportConfig: createDefaultExportConfig_ACU(),
+                orderNo: typeof metadataSheet.orderNo === 'number' ? metadataSheet.orderNo : orderNo,
+            };
+            orderNo += 1;
+        });
+        return Object.keys(data).some(key => key.startsWith('sheet_')) ? data : null;
+    }
     function isSheetLike_ACU(value) {
         return !!value && typeof value === 'object' && Array.isArray(value.content);
     }
@@ -6742,9 +6841,14 @@ $CONTENT
                 mergeIndependentSnapshot_ACU(data, foundSheets, legacyIndependent, activeTemplateSheetKeySet);
                 readModifiedKeys_ACU(message).forEach(key => modifiedKeys.add(key));
                 readUpdateGroupKeys_ACU(message).forEach(key => updateGroupKeys.add(key));
-                mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message), {
+                const legacyStandard = readLegacyStandardData_ACU(message);
+                mergeLegacyContainer_ACU(data, foundSheets, legacyStandard, {
                     templateSheetKeySet: activeTemplateSheetKeySet,
                     summaryOnly: false,
+                });
+                mergeLegacyContainer_ACU(data, foundSheets, legacyStandard, {
+                    templateSheetKeySet: activeTemplateSheetKeySet,
+                    summaryOnly: true,
                 });
                 mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message), {
                     templateSheetKeySet: activeTemplateSheetKeySet,
@@ -6818,13 +6922,56 @@ $CONTENT
         }
         writeTablePersistenceLayerV2_ACU(msg, isolationKey, layer);
     }
+    function isRootMetadataOnlyMessage_ACU(message) {
+        if (!message || typeof message !== 'object' || Array.isArray(message))
+            return false;
+        if (!message.chat_metadata)
+            return false;
+        if (Object.prototype.hasOwnProperty.call(message, 'is_user'))
+            return false;
+        if (typeof message.mes === 'string')
+            return false;
+        if (Array.isArray(message.swipes))
+            return false;
+        if (message.TavernDB_ACU_IndependentData !== undefined)
+            return false;
+        if (message.TavernDB_ACU_Data !== undefined)
+            return false;
+        if (message.TavernDB_ACU_SummaryData !== undefined)
+            return false;
+        if (message.TavernDB_ACU_IsolatedData !== undefined)
+            return false;
+        return true;
+    }
+    function isWritableAiMessage_ACU(message) {
+        if (!message || typeof message !== 'object' || Array.isArray(message))
+            return false;
+        if (message.is_user === true)
+            return false;
+        if (isRootMetadataOnlyMessage_ACU(message))
+            return false;
+        if (message.is_user === false)
+            return true;
+        if (typeof message.mes === 'string')
+            return true;
+        if (Array.isArray(message.swipes))
+            return true;
+        if (message.TavernDB_ACU_IndependentData !== undefined)
+            return true;
+        if (message.TavernDB_ACU_Data !== undefined)
+            return true;
+        if (message.TavernDB_ACU_SummaryData !== undefined)
+            return true;
+        if (message.TavernDB_ACU_IsolatedData !== undefined)
+            return true;
+        return false;
+    }
     function findFirstWritableAiMessageIndex_ACU(chat, startIndex = 0) {
         if (!Array.isArray(chat))
             return -1;
         const safeStartIndex = Math.max(0, Math.trunc(Number(startIndex) || 0));
         for (let i = safeStartIndex; i < chat.length; i += 1) {
-            const message = chat[i];
-            if (message && !message.is_user)
+            if (isWritableAiMessage_ACU(chat[i]))
                 return i;
         }
         return -1;
@@ -6897,9 +7044,7 @@ $CONTENT
         if (targetMessageIndex < 0 || targetMessageIndex >= chat.length)
             return null;
         const anchorMessage = chat[targetMessageIndex];
-        if (!anchorMessage)
-            return null;
-        if (anchorMessage.is_user)
+        if (!isWritableAiMessage_ACU(anchorMessage))
             return null;
         const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, targetMessageIndex);
         migrateLegacyCheckpointToMessage_ACU(anchorMessage, isolationKey, rootCheckpoint);
@@ -6916,6 +7061,16 @@ $CONTENT
     }
     function hasAnySheet_ACU$1(data) {
         return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+    }
+    function convertFirstChatMetadataSheetsToTableData_ACU(chat, endExclusive) {
+        for (let i = 0; i < endExclusive; i += 1) {
+            const metadataSheets = chat[i]?.chat_metadata?.sheets;
+            const data = convertChatMetadataSheetsToTableData_ACU(metadataSheets);
+            if (hasAnySheet_ACU$1(data)) {
+                return data;
+            }
+        }
+        return null;
     }
     /**
      * 从模板对象构建表格基底状态数据（内联自 helpers-data-merge.ts）
@@ -6965,13 +7120,15 @@ $CONTENT
             }
         }
         if (sawV2Checkpoint) {
-            return {
-                data: hasAnySheet_ACU$1(data) ? data : null,
-                checkpoint,
-                checkpointMessageIndex,
-                usedLegacyMigration: false,
-                changed: false,
-            };
+            if (hasAnySheet_ACU$1(data))
+                return {
+                    data: hasAnySheet_ACU$1(data) ? data : null,
+                    checkpoint,
+                    checkpointMessageIndex,
+                    usedLegacyMigration: false,
+                    changed: false,
+                };
+            // 空/错误 V2 checkpoint 不能永久遮蔽后续有效 legacy；继续进入 legacy fallback。
         }
         if (options.allowLegacyMigration === false) {
             return {
@@ -6983,7 +7140,9 @@ $CONTENT
         }
         const legacyBoundaryIndex = firstV2MessageIndex === undefined
             ? endExclusive - 1
-            : firstV2MessageIndex - 1;
+            : sawV2Checkpoint && !hasAnySheet_ACU$1(data)
+                ? endExclusive - 1
+                : firstV2MessageIndex - 1;
         const legacyResult = buildLegacyCheckpointFromChat_ACU(chat, {
             isolationKey: context.isolationKey,
             isolationConfig: context.isolationConfig,
@@ -6991,6 +7150,44 @@ $CONTENT
             targetBoundaryMessageIndex: legacyBoundaryIndex,
         });
         if (!legacyResult.checkpoint || legacyResult.checkpointMessageIndex === undefined) {
+            const metadataFallbackData = !hasAnySheet_ACU$1(data)
+                ? convertFirstChatMetadataSheetsToTableData_ACU(chat, endExclusive)
+                : null;
+            if (metadataFallbackData && hasAnySheet_ACU$1(metadataFallbackData)) {
+                const metadataCheckpoint = {
+                    kind: 'checkpoint',
+                    version: 2,
+                    checkpointId: `legacy-metadata-fallback-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+                    createdAt: new Date().toISOString(),
+                    source: 'legacy-migration',
+                    isolationKey: context.isolationKey,
+                    data: cloneJson_ACU$4(metadataFallbackData),
+                };
+                let changed = false;
+                let metadataCheckpointMessageIndex;
+                let checkpointToReturn = cloneJson_ACU$4(metadataCheckpoint);
+                if (options.saveChatAfterMigration !== false) {
+                    try {
+                        const migrationTargetMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(chat, context.isolationKey, context.isolationConfig, options.retainRecentLayers);
+                        const migrationResult = migrateLegacyCheckpointToRootMessage_ACU(chat, context.isolationKey, metadataCheckpoint, migrationTargetMessageIndex);
+                        if (migrationResult !== null) {
+                            metadataCheckpointMessageIndex = migrationResult.messageIndex;
+                            checkpointToReturn = cloneJson_ACU$4(migrationResult.checkpoint);
+                            changed = true;
+                        }
+                    }
+                    catch (error) {
+                        logWarn_ACU('[TableDeltaMigration] Failed to write legacy metadata fallback checkpoint:', error);
+                    }
+                }
+                return {
+                    data: cloneJson_ACU$4(metadataFallbackData),
+                    checkpoint: checkpointToReturn,
+                    checkpointMessageIndex: metadataCheckpointMessageIndex,
+                    usedLegacyMigration: true,
+                    changed,
+                };
+            }
             // ── A1b: 无旧快照，但有孤立 V2 delta → 从模板建表累加 delta 生成 checkpoint ──
             if (sawV2 && firstV2MessageIndex !== undefined) {
                 const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: false });
@@ -7059,13 +7256,23 @@ $CONTENT
         let changed = false;
         let migratedCheckpointMessageIndex = legacyResult.checkpointMessageIndex;
         let migratedCheckpoint = cloneJson_ACU$4(legacyResult.checkpoint);
+        const migrationTargetChat = endExclusive === chat.length
+            ? chat
+            : chat.slice(0, endExclusive);
+        const migrationTargetMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(migrationTargetChat, context.isolationKey, context.isolationConfig, options.retainRecentLayers);
         if (options.saveChatAfterMigration !== false) {
             try {
-                const migrationResult = migrateLegacyCheckpointToRootMessage_ACU(chat, context.isolationKey, legacyResult.checkpoint, legacyResult.checkpointMessageIndex);
+                const migrationResult = migrateLegacyCheckpointToRootMessage_ACU(chat, context.isolationKey, legacyResult.checkpoint, migrationTargetMessageIndex);
                 if (migrationResult !== null) {
                     migratedCheckpointMessageIndex = migrationResult.messageIndex;
                     migratedCheckpoint = cloneJson_ACU$4(migrationResult.checkpoint);
                     changed = true;
+                    for (let i = 0; i <= legacyBoundaryIndex; i++) {
+                        const message = chat[i];
+                        if (!message || message.is_user)
+                            continue;
+                        clearCurrentIsolationLegacyTableSnapshots_ACU(message, context.isolationKey, context.isolationConfig);
+                    }
                 }
             }
             catch (error) {

@@ -2,8 +2,17 @@ import type { IsolationConfig_ACU } from '../../data/models/chat-message-data';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { logWarn_ACU } from '../../shared/utils';
 import { applyTableDelta_ACU } from './table-delta-apply';
-import { buildLegacyCheckpointFromChat_ACU, migrateLegacyCheckpointToRootMessage_ACU } from './table-delta-migration';
-import { readTablePersistenceLayerV2_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
+import {
+  buildLegacyCheckpointFromChat_ACU,
+  convertChatMetadataSheetsToTableData_ACU,
+  migrateLegacyCheckpointToRootMessage_ACU,
+  resolveLegacyCheckpointAnchorMessageIndex_ACU,
+} from './table-delta-migration';
+import {
+  clearCurrentIsolationLegacyTableSnapshots_ACU,
+  readTablePersistenceLayerV2_ACU,
+  writeTablePersistenceLayerV2_ACU,
+} from './table-delta-repository';
 import type { ReconstructTablesFromChatDeltasOptions_ACU, TableCheckpointV2_ACU } from './table-delta-types';
 import { getTablePersistenceDeltasV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 import { parseTableTemplateJson_ACU } from '../../shared/utils';
@@ -20,6 +29,20 @@ function normalizeEndExclusive_ACU(chat: any[], targetMessageIndexExclusive?: nu
 
 function hasAnySheet_ACU(data: TableDataObject_ACU | null): boolean {
   return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+}
+
+function convertFirstChatMetadataSheetsToTableData_ACU(
+  chat: any[],
+  endExclusive: number,
+): TableDataObject_ACU | null {
+  for (let i = 0; i < endExclusive; i += 1) {
+    const metadataSheets = chat[i]?.chat_metadata?.sheets;
+    const data = convertChatMetadataSheetsToTableData_ACU(metadataSheets);
+    if (hasAnySheet_ACU(data)) {
+      return data;
+    }
+  }
+  return null;
 }
 
 /**
@@ -90,13 +113,14 @@ export function reconstructTablesFromChatDeltas_ACU(
   }
 
   if (sawV2Checkpoint) {
-    return {
+    if (hasAnySheet_ACU(data)) return {
       data: hasAnySheet_ACU(data) ? data : null,
       checkpoint,
       checkpointMessageIndex,
       usedLegacyMigration: false,
       changed: false,
     };
+    // 空/错误 V2 checkpoint 不能永久遮蔽后续有效 legacy；继续进入 legacy fallback。
   }
 
   if (options.allowLegacyMigration === false) {
@@ -110,7 +134,9 @@ export function reconstructTablesFromChatDeltas_ACU(
 
   const legacyBoundaryIndex = firstV2MessageIndex === undefined
     ? endExclusive - 1
-    : firstV2MessageIndex - 1;
+    : sawV2Checkpoint && !hasAnySheet_ACU(data)
+      ? endExclusive - 1
+      : firstV2MessageIndex - 1;
   const legacyResult = buildLegacyCheckpointFromChat_ACU(chat, {
     isolationKey: context.isolationKey,
     isolationConfig: context.isolationConfig,
@@ -119,6 +145,57 @@ export function reconstructTablesFromChatDeltas_ACU(
   });
 
   if (!legacyResult.checkpoint || legacyResult.checkpointMessageIndex === undefined) {
+    const metadataFallbackData = !hasAnySheet_ACU(data)
+      ? convertFirstChatMetadataSheetsToTableData_ACU(chat, endExclusive)
+      : null;
+    if (metadataFallbackData && hasAnySheet_ACU(metadataFallbackData)) {
+      const metadataCheckpoint: TableCheckpointV2_ACU = {
+        kind: 'checkpoint',
+        version: 2,
+        checkpointId: `legacy-metadata-fallback-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+        createdAt: new Date().toISOString(),
+        source: 'legacy-migration',
+        isolationKey: context.isolationKey,
+        data: cloneJson_ACU(metadataFallbackData),
+      };
+
+      let changed = false;
+      let metadataCheckpointMessageIndex: number | undefined;
+      let checkpointToReturn = cloneJson_ACU(metadataCheckpoint);
+
+      if (options.saveChatAfterMigration !== false) {
+        try {
+          const migrationTargetMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(
+            chat,
+            context.isolationKey,
+            context.isolationConfig,
+            options.retainRecentLayers,
+          );
+          const migrationResult = migrateLegacyCheckpointToRootMessage_ACU(
+            chat,
+            context.isolationKey,
+            metadataCheckpoint,
+            migrationTargetMessageIndex,
+          );
+          if (migrationResult !== null) {
+            metadataCheckpointMessageIndex = migrationResult.messageIndex;
+            checkpointToReturn = cloneJson_ACU(migrationResult.checkpoint);
+            changed = true;
+          }
+        } catch (error) {
+          logWarn_ACU('[TableDeltaMigration] Failed to write legacy metadata fallback checkpoint:', error);
+        }
+      }
+
+      return {
+        data: cloneJson_ACU(metadataFallbackData),
+        checkpoint: checkpointToReturn,
+        checkpointMessageIndex: metadataCheckpointMessageIndex,
+        usedLegacyMigration: true,
+        changed,
+      };
+    }
+
     // ── A1b: 无旧快照，但有孤立 V2 delta → 从模板建表累加 delta 生成 checkpoint ──
     if (sawV2 && firstV2MessageIndex !== undefined) {
       const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: false });
@@ -190,18 +267,38 @@ export function reconstructTablesFromChatDeltas_ACU(
   let changed = false;
   let migratedCheckpointMessageIndex = legacyResult.checkpointMessageIndex;
   let migratedCheckpoint = cloneJson_ACU(legacyResult.checkpoint);
+
+  const migrationTargetChat = endExclusive === chat.length
+    ? chat
+    : chat.slice(0, endExclusive);
+  const migrationTargetMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(
+    migrationTargetChat,
+    context.isolationKey,
+    context.isolationConfig,
+    options.retainRecentLayers,
+  );
   if (options.saveChatAfterMigration !== false) {
     try {
       const migrationResult = migrateLegacyCheckpointToRootMessage_ACU(
         chat,
         context.isolationKey,
         legacyResult.checkpoint,
-        legacyResult.checkpointMessageIndex!,
+        migrationTargetMessageIndex,
       );
       if (migrationResult !== null) {
         migratedCheckpointMessageIndex = migrationResult.messageIndex;
         migratedCheckpoint = cloneJson_ACU(migrationResult.checkpoint);
         changed = true;
+
+        for (let i = 0; i <= legacyBoundaryIndex; i++) {
+          const message = chat[i];
+          if (!message || message.is_user) continue;
+          clearCurrentIsolationLegacyTableSnapshots_ACU(
+            message,
+            context.isolationKey,
+            context.isolationConfig,
+          );
+        }
       }
     } catch (error) {
       logWarn_ACU('[TableDeltaMigration] Failed to write legacy root checkpoint:', error);

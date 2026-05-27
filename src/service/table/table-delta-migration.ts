@@ -35,6 +35,114 @@ function createEmptyTableData_ACU(): TableDataObject_ACU {
   };
 }
 
+function createDefaultSourceData_ACU(): Sheet_ACU['sourceData'] {
+  return { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' };
+}
+
+function createDefaultUpdateConfig_ACU(): Sheet_ACU['updateConfig'] {
+  return { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 };
+}
+
+function createDefaultExportConfig_ACU(): Sheet_ACU['exportConfig'] {
+  return {
+    enabled: false,
+    splitByRow: false,
+    entryName: '',
+    entryType: '',
+    keywords: '',
+    preventRecursion: false,
+    injectionTemplate: '',
+    extraIndexEnabled: false,
+    extraIndexEntryName: '',
+    extraIndexColumns: [],
+    extraIndexColumnModes: {},
+    extraIndexInjectionTemplate: '',
+    entryPlacement: { position: '', depth: 0, order: 0 },
+    extraIndexPlacement: { position: '', depth: 0, order: 0 },
+    fixedEntryPlacement: { position: '', depth: 0, order: 0 },
+    fixedIndexPlacement: { position: '', depth: 0, order: 0 },
+  };
+}
+
+function asRecord_ACU(value: unknown): Record<string, any> | null {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : null;
+}
+
+function readString_ACU(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function extractMetadataHeaderRow_ACU(metadataSheet: Record<string, any>): string[] {
+  const cellHistory = Array.isArray(metadataSheet.cellHistory) ? metadataSheet.cellHistory : [];
+  const headerByUid = new Map<string, string>();
+  const headersByHistoryOrder: string[] = [];
+
+  cellHistory.forEach(cell => {
+    const record = asRecord_ACU(cell);
+    if (!record || record.type !== 'column_header') return;
+    const value = readString_ACU(asRecord_ACU(record.data)?.value).trim();
+    if (!value) return;
+    if (typeof record.uid === 'string') headerByUid.set(record.uid, value);
+    headersByHistoryOrder.push(value);
+  });
+
+  const hashSheet = Array.isArray(metadataSheet.hashSheet) ? metadataSheet.hashSheet : [];
+  const firstHashRow = Array.isArray(hashSheet[0]) ? hashSheet[0] : [];
+  const headersByHashOrder = firstHashRow
+    .map(cellUid => typeof cellUid === 'string' ? headerByUid.get(cellUid) : undefined)
+    .filter((header): header is string => !!header);
+
+  const headers = headersByHashOrder.length > 0 ? headersByHashOrder : headersByHistoryOrder;
+  return ['row_id', ...headers];
+}
+
+function extractMetadataSourceData_ACU(metadataSheet: Record<string, any>): Sheet_ACU['sourceData'] {
+  const cellHistory = Array.isArray(metadataSheet.cellHistory) ? metadataSheet.cellHistory : [];
+  const sourceCell = cellHistory
+    .map(cell => asRecord_ACU(cell))
+    .find(cell => cell?.type === 'sheet_origin');
+  const source = asRecord_ACU(sourceCell?.data);
+  return {
+    ...createDefaultSourceData_ACU(),
+    note: readString_ACU(source?.note),
+    initNode: readString_ACU(source?.initNode),
+    deleteNode: readString_ACU(source?.deleteNode),
+    updateNode: readString_ACU(source?.updateNode),
+    insertNode: readString_ACU(source?.insertNode),
+  };
+}
+
+export function convertChatMetadataSheetsToTableData_ACU(metadataSheets: unknown): TableDataObject_ACU | null {
+  if (!Array.isArray(metadataSheets)) return null;
+  const data = createEmptyTableData_ACU();
+  let orderNo = 0;
+
+  metadataSheets.forEach(metadataSheetValue => {
+    const metadataSheet = asRecord_ACU(metadataSheetValue);
+    const uid = readString_ACU(metadataSheet?.uid);
+    const name = readString_ACU(metadataSheet?.name);
+    if (!metadataSheet || !uid.startsWith('sheet_') || !name) return;
+
+    const headerRow = extractMetadataHeaderRow_ACU(metadataSheet);
+    if (headerRow.length <= 1) return;
+
+    data[uid] = {
+      uid,
+      name,
+      sourceData: extractMetadataSourceData_ACU(metadataSheet),
+      content: [headerRow],
+      updateConfig: createDefaultUpdateConfig_ACU(),
+      exportConfig: createDefaultExportConfig_ACU(),
+      orderNo: typeof metadataSheet.orderNo === 'number' ? metadataSheet.orderNo : orderNo,
+    };
+    orderNo += 1;
+  });
+
+  return Object.keys(data).some(key => key.startsWith('sheet_')) ? data : null;
+}
+
 function isSheetLike_ACU(value: unknown): value is Sheet_ACU {
   return !!value && typeof value === 'object' && Array.isArray((value as Sheet_ACU).content);
 }
@@ -130,9 +238,14 @@ export function buildLegacyCheckpointFromChat_ACU(
       readModifiedKeys_ACU(message).forEach(key => modifiedKeys.add(key));
       readUpdateGroupKeys_ACU(message).forEach(key => updateGroupKeys.add(key));
 
-      mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message) as Record<string, unknown> | null, {
+      const legacyStandard = readLegacyStandardData_ACU(message) as Record<string, unknown> | null;
+      mergeLegacyContainer_ACU(data, foundSheets, legacyStandard, {
         templateSheetKeySet: activeTemplateSheetKeySet,
         summaryOnly: false,
+      });
+      mergeLegacyContainer_ACU(data, foundSheets, legacyStandard, {
+        templateSheetKeySet: activeTemplateSheetKeySet,
+        summaryOnly: true,
       });
       mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message) as Record<string, unknown> | null, {
         templateSheetKeySet: activeTemplateSheetKeySet,
@@ -213,12 +326,38 @@ export function migrateLegacyCheckpointToMessage_ACU(
   writeTablePersistenceLayerV2_ACU(msg, isolationKey, layer);
 }
 
+function isRootMetadataOnlyMessage_ACU(message: any): boolean {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return false;
+  if (!message.chat_metadata) return false;
+  if (Object.prototype.hasOwnProperty.call(message, 'is_user')) return false;
+  if (typeof message.mes === 'string') return false;
+  if (Array.isArray(message.swipes)) return false;
+  if (message.TavernDB_ACU_IndependentData !== undefined) return false;
+  if (message.TavernDB_ACU_Data !== undefined) return false;
+  if (message.TavernDB_ACU_SummaryData !== undefined) return false;
+  if (message.TavernDB_ACU_IsolatedData !== undefined) return false;
+  return true;
+}
+
+export function isWritableAiMessage_ACU(message: any): boolean {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return false;
+  if (message.is_user === true) return false;
+  if (isRootMetadataOnlyMessage_ACU(message)) return false;
+  if (message.is_user === false) return true;
+  if (typeof message.mes === 'string') return true;
+  if (Array.isArray(message.swipes)) return true;
+  if (message.TavernDB_ACU_IndependentData !== undefined) return true;
+  if (message.TavernDB_ACU_Data !== undefined) return true;
+  if (message.TavernDB_ACU_SummaryData !== undefined) return true;
+  if (message.TavernDB_ACU_IsolatedData !== undefined) return true;
+  return false;
+}
+
 export function findFirstWritableAiMessageIndex_ACU(chat: any[], startIndex = 0): number {
   if (!Array.isArray(chat)) return -1;
   const safeStartIndex = Math.max(0, Math.trunc(Number(startIndex) || 0));
   for (let i = safeStartIndex; i < chat.length; i += 1) {
-    const message = chat[i];
-    if (message && !message.is_user) return i;
+    if (isWritableAiMessage_ACU(chat[i])) return i;
   }
   return -1;
 }
@@ -314,8 +453,7 @@ export function migrateLegacyCheckpointToRootMessage_ACU(
   if (targetMessageIndex < 0 || targetMessageIndex >= chat.length) return null;
 
   const anchorMessage = chat[targetMessageIndex];
-  if (!anchorMessage) return null;
-  if (anchorMessage.is_user) return null;
+  if (!isWritableAiMessage_ACU(anchorMessage)) return null;
 
   const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, targetMessageIndex);
 

@@ -414,6 +414,142 @@ describe('SqlTableService', () => {
       expect(schemaColumnNames).toContain('quantity');
     });
 
+    it('样本风格 legacy migration 多表数据应导入 SQLite 并保留 summary/outline 历史行', async () => {
+      const migratedLegacySampleData = {
+        mate: {
+          type: 'acu',
+          version: 1,
+          updateConfigUiSentinel: 0,
+          globalInjectionConfig: {
+            readableEntryPlacement: { position: '', depth: 0, order: 0 },
+            wrapperPlacement: { position: '', depth: 0, order: 0 },
+          },
+        },
+        sheet_dCudvUnH: {
+          uid: 'global_state',
+          name: '全局数据表',
+          sourceData: {
+            note: '',
+            initNode: '',
+            deleteNode: '',
+            updateNode: '',
+            insertNode: '',
+            ddl: `CREATE TABLE global_state (
+              row_id INTEGER PRIMARY KEY,
+              location TEXT NOT NULL,
+              scene_time TEXT NOT NULL
+            );`,
+          },
+          content: [
+            ['row_id', 'location', 'scene_time'],
+            ['1', '老旧公寓楼三楼家门口', '20XX-09-25 14:30'],
+          ],
+          updateConfig: { uiSentinel: 0, contextDepth: 0, updateFrequency: 0, batchSize: 0, skipFloors: 0 },
+          exportConfig: {},
+          orderNo: 0,
+        },
+        sheet_DpKcVGqg: {
+          uid: 'protagonist_profile',
+          name: '主角信息',
+          sourceData: {
+            note: '',
+            initNode: '',
+            deleteNode: '',
+            updateNode: '',
+            insertNode: '',
+            ddl: `CREATE TABLE protagonist_profile (
+              row_id INTEGER PRIMARY KEY,
+              character_name TEXT NOT NULL,
+              age_label TEXT NOT NULL,
+              history TEXT NOT NULL
+            );`,
+          },
+          content: [
+            ['row_id', 'character_name', 'age_label', 'history'],
+            ['1', '陈默', '男/30岁', '因保护妻子入狱三年，刚出狱回家。'],
+          ],
+          updateConfig: { uiSentinel: 0, contextDepth: 0, updateFrequency: 0, batchSize: 0, skipFloors: 0 },
+          exportConfig: {},
+          orderNo: 1,
+        },
+        sheet_3NoMc1wI: {
+          uid: 'summary_log',
+          name: '总结表',
+          sourceData: {
+            note: '',
+            initNode: '',
+            deleteNode: '',
+            updateNode: '',
+            insertNode: '',
+            ddl: `CREATE TABLE summary_log (
+              row_id INTEGER PRIMARY KEY,
+              time_span TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              code_index TEXT NOT NULL
+            );`,
+          },
+          content: [
+            ['row_id', 'time_span', 'summary', 'code_index'],
+            ['1', '20XX-09-25 午后', '陈默出狱回到家门口，犹豫如何面对苏婉。', 'AM01'],
+          ],
+          updateConfig: { uiSentinel: 0, contextDepth: 0, updateFrequency: 0, batchSize: 0, skipFloors: 0 },
+          exportConfig: {},
+          orderNo: 6,
+        },
+        sheet_PfzcX5v2: {
+          uid: 'outline_log',
+          name: '总体大纲',
+          sourceData: {
+            note: '',
+            initNode: '',
+            deleteNode: '',
+            updateNode: '',
+            insertNode: '',
+            ddl: `CREATE TABLE outline_log (
+              row_id INTEGER PRIMARY KEY,
+              outline TEXT NOT NULL,
+              code_index TEXT NOT NULL
+            );`,
+          },
+          content: [
+            ['row_id', 'outline', 'code_index'],
+            ['1', '陈默出狱回家，面对熟悉旧居与未知妻子。', 'AM01'],
+          ],
+          updateConfig: { uiSentinel: 0, contextDepth: 0, updateFrequency: 0, batchSize: 0, skipFloors: 0 },
+          exportConfig: {},
+          orderNo: 7,
+        },
+      };
+      mockMergeAllWithMeta.mockResolvedValueOnce({
+        data: migratedLegacySampleData,
+        usedLegacyMigration: true,
+        changed: true,
+        foundSheetCount: 4,
+      });
+
+      const result = await service.loadFromChat();
+
+      expect(result.loaded).toBe(true);
+      expect(result.source).toBe('merged');
+      expect(service.executeQuery('SELECT location, scene_time FROM global_state').values[0]).toEqual([
+        '老旧公寓楼三楼家门口',
+        '20XX-09-25 14:30',
+      ]);
+      expect(service.executeQuery('SELECT character_name, history FROM protagonist_profile').values[0]).toEqual([
+        '陈默',
+        '因保护妻子入狱三年，刚出狱回家。',
+      ]);
+      expect(service.executeQuery('SELECT time_span, summary, code_index FROM summary_log').values[0]).toEqual([
+        '20XX-09-25 午后',
+        '陈默出狱回到家门口，犹豫如何面对苏婉。',
+        'AM01',
+      ]);
+      expect(service.executeQuery('SELECT outline, code_index FROM outline_log').values[0]).toEqual([
+        '陈默出狱回家，面对熟悉旧居与未知妻子。',
+        'AM01',
+      ]);
+    });
+
     it('加载后可以执行查询', async () => {
       mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
       await service.loadFromChat();
@@ -1067,7 +1203,7 @@ describe('SqlTableService', () => {
 
       const options = mockSaveIndependentTable.mock.calls[0][0];
       expect(options.beforeData.sheet_0.content).toEqual(testTableData.sheet_0.content);
-      expect(options.afterData.sheet_0.content).toEqual([['row_id']]);
+      expect(options.afterData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
       expect(options.allowClearingTargetSheets).toBeUndefined();
     });
   });

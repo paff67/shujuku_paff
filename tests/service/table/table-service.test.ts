@@ -496,6 +496,41 @@ describe('loadOrCreateJsonTableFromChatHistory_ACU', () => {
     expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(mergedData);
   });
 
+  it('样本风格旧 native 合并数据进入原生加载入口时不初始化为空模板', async () => {
+    mockGetChatArray.mockReturnValue([
+      { is_user: true, mes: '敲门' },
+      { is_user: false, mes: 'AI回复' },
+    ]);
+    const mergedData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_dCudvUnH: {
+        uid: 'sheet_dCudvUnH',
+        name: '全局数据表',
+        content: [['row_id', '主角当前所在地点', '当前时间'], ['1', '老旧公寓楼三楼家门口', '20XX-09-25 14:30']],
+      },
+      sheet_DpKcVGqg: {
+        uid: 'sheet_DpKcVGqg',
+        name: '主角信息',
+        content: [['row_id', '人物名称', '性别/年龄'], ['1', '陈默', '男/30岁']],
+      },
+      sheet_3NoMc1wI: {
+        uid: 'sheet_3NoMc1wI',
+        name: '总结表',
+        content: [['row_id', '时间跨度', '纪要', '编码索引'], ['1', '20XX-09-25 午后', '陈默出狱回到家门口。', 'AM01']],
+      },
+    };
+    mockMergeAllIndependentTables.mockResolvedValue(mergedData);
+
+    const result = await loadOrCreateJsonTableFromChatHistory_ACU();
+
+    expect(result.source).toBe('merged');
+    expect(result.loaded).toBe(true);
+    expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(mergedData);
+    expect(mockCurrentJsonTableDataRef.value.sheet_3NoMc1wI.content[1][3]).toBe('AM01');
+    expect(mockParseTableTemplateJson).not.toHaveBeenCalled();
+    expect(mockDeleteAllGeneratedEntries).not.toHaveBeenCalled();
+  });
+
   it('无合并数据时触发初始化', async () => {
     mockGetChatArray.mockReturnValue([
       { is_user: false, mes: 'AI回复' },

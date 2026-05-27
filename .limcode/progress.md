@@ -1,6 +1,6 @@
 # 项目进度
 - Project: SP数据库
-- Updated At: 2026-05-27T03:45:01.013Z
+- Updated At: 2026-05-27T11:27:34.845Z
 - Status: completed
 - Phase: review
 
@@ -17,18 +17,19 @@
 
 <!-- LIMCODE_PROGRESS_ARTIFACTS_START -->
 - 设计：`.limcode/design/填表架构重构ai反馈合并前置分组对后续步骤透明.md`
-- 计划：`.limcode/plans/填表架构重构ai反馈合并前置分组对后续步骤透明.plan.md`
+- 计划：`.limcode/plans/legacy-native-read-compat-fix.md`
 <!-- LIMCODE_PROGRESS_ARTIFACTS_END -->
 
 ## 当前 TODO 快照
 
 <!-- LIMCODE_PROGRESS_TODOS_START -->
-- [x] 定义并实现批次执行帧构建逻辑：按 group.indices + group.batchSize 拆分为 round，round 内保留各 group 的上下文差异  `#step_1`
-- [x] 重构手动填表编排：每个 round 基于当前快照准备 prompt，round 内组并发生成，合并应用并持久化后刷新，再进入下一 round  `#step_2`
-- [x] 重构自动填表编排：保留自动表级参数产生的 updateGroups，同样按 round 串行执行并在 round 内并发不同组  `#step_3`
-- [x] 调整进度 toast 与 batch 计数语义：显示上下文批次 round 进度，避免把 preparedCall 数量误当批次总数  `#step_4`
-- [x] 保留并校正 SQL apply 失败重试：重试仅针对当前 round，注入错误后重新生成当前 round 响应，不跨批污染  `#step_5`
-- [x] 验证与回归：TypeScript 编译、bundle 构建、静态检查关键并发点，必要时补充测试或日志验证方案  `#step_6`
+- [x] 构造真实样本驱动的旧 native 复现测试：根元数据 chat_metadata.sheets + AI 消息顶层 TavernDB_ACU_Data，确认当前读取链路在哪一层丢失数据  `#legacy_native_fix_1`
+- [x] 确认运行时聊天数组来源是否包含导入 JSONL 的消息级 TavernDB_ACU_Data，以及是否被 V2 checkpoint、模板 seed 或清理路径遮蔽  `#legacy_native_fix_2`
+- [x] 按复现结果实施最小兼容修复：优先修消息级 TavernDB_ACU_Data 读取/迁移链路；仅在无消息级数据时把 chat_metadata.sheets 转换作为保护性 fallback  `#legacy_native_fix_3`
+- [x] 补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行  `#legacy_native_fix_4`
+- [x] 运行定向 vitest、关键回归、tsc、rollup，并处理失败  `#legacy_native_fix_5`
+- [x] 调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界  `#legacy_native_fix_6`
+- [ ] 验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布  `#legacy_native_fix_7` (in_progress)
 <!-- LIMCODE_PROGRESS_TODOS_END -->
 
 ## 项目里程碑
@@ -46,7 +47,6 @@
 ## 最近更新
 
 <!-- LIMCODE_PROGRESS_LOG_START -->
-- 2026-05-23T09:58:50.437Z | created | 初始化项目进度
 - 2026-05-23T09:58:50.437Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T10:38:02.497Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
 - 2026-05-23T10:42:29.104Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-snapshot-migration-refactor.md
@@ -56,6 +56,17 @@
 - 2026-05-23T16:41:21.090Z | artifact_changed | plan | 同步计划文档：.limcode/plans/填表架构重构ai反馈合并前置分组对后续步骤透明.plan.md
 - 2026-05-23T16:51:37.765Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/填表架构重构ai反馈合并前置分组对后续步骤透明.plan.md
 - 2026-05-27T03:04:51.745Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/填表架构重构ai反馈合并前置分组对后续步骤透明.plan.md
+- 2026-05-27T08:08:10.021Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T08:23:04.712Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T08:41:49.510Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T09:00:45.385Z | artifact_changed | plan | 同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T09:32:11.375Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T10:03:45.821Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T10:17:35.639Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T10:32:45.794Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T10:53:57.843Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T10:57:03.897Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
+- 2026-05-27T11:27:34.845Z | artifact_changed | plan | 同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md
 <!-- LIMCODE_PROGRESS_LOG_END -->
 
 <!-- LIMCODE_PROGRESS_METADATA_START -->
@@ -65,7 +76,7 @@
   "projectId": "sp数据库",
   "projectName": "SP数据库",
   "createdAt": "2026-05-23T09:58:50.437Z",
-  "updatedAt": "2026-05-27T03:45:01.013Z",
+  "updatedAt": "2026-05-27T11:27:34.845Z",
   "status": "completed",
   "phase": "review",
   "currentFocus": "验收五项修复全部通过，round 串行快照模型健壮性修复完成",
@@ -74,48 +85,48 @@
   "nextAction": "无待办事项。如需进一步优化可考虑：两条路径的重试/apply/persist 重复代码抽取共享策略函数",
   "activeArtifacts": {
     "design": ".limcode/design/填表架构重构ai反馈合并前置分组对后续步骤透明.md",
-    "plan": ".limcode/plans/填表架构重构ai反馈合并前置分组对后续步骤透明.plan.md"
+    "plan": ".limcode/plans/legacy-native-read-compat-fix.md"
   },
   "todos": [
     {
-      "id": "step_1",
-      "content": "定义并实现批次执行帧构建逻辑：按 group.indices + group.batchSize 拆分为 round，round 内保留各 group 的上下文差异",
+      "id": "legacy_native_fix_1",
+      "content": "构造真实样本驱动的旧 native 复现测试：根元数据 chat_metadata.sheets + AI 消息顶层 TavernDB_ACU_Data，确认当前读取链路在哪一层丢失数据",
       "status": "completed"
     },
     {
-      "id": "step_2",
-      "content": "重构手动填表编排：每个 round 基于当前快照准备 prompt，round 内组并发生成，合并应用并持久化后刷新，再进入下一 round",
+      "id": "legacy_native_fix_2",
+      "content": "确认运行时聊天数组来源是否包含导入 JSONL 的消息级 TavernDB_ACU_Data，以及是否被 V2 checkpoint、模板 seed 或清理路径遮蔽",
       "status": "completed"
     },
     {
-      "id": "step_3",
-      "content": "重构自动填表编排：保留自动表级参数产生的 updateGroups，同样按 round 串行执行并在 round 内并发不同组",
+      "id": "legacy_native_fix_3",
+      "content": "按复现结果实施最小兼容修复：优先修消息级 TavernDB_ACU_Data 读取/迁移链路；仅在无消息级数据时把 chat_metadata.sheets 转换作为保护性 fallback",
       "status": "completed"
     },
     {
-      "id": "step_4",
-      "content": "调整进度 toast 与 batch 计数语义：显示上下文批次 round 进度，避免把 preparedCall 数量误当批次总数",
+      "id": "legacy_native_fix_4",
+      "content": "补充 migration、helpers 合并入口、native provider、SQLite provider 回归测试，覆盖样本 uid sheet key、summary/outline、模板元数据不误当历史行",
       "status": "completed"
     },
     {
-      "id": "step_5",
-      "content": "保留并校正 SQL apply 失败重试：重试仅针对当前 round，注入错误后重新生成当前 round 响应，不跨批污染",
+      "id": "legacy_native_fix_5",
+      "content": "运行定向 vitest、关键回归、tsc、rollup，并处理失败",
       "status": "completed"
     },
     {
-      "id": "step_6",
-      "content": "验证与回归：TypeScript 编译、bundle 构建、静态检查关键并发点，必要时补充测试或日志验证方案",
+      "id": "legacy_native_fix_6",
+      "content": "调用验收专家复查，重点审查是否真正覆盖用户样本、标准 legacy、V2 优先级与 chat_metadata fallback 边界",
       "status": "completed"
+    },
+    {
+      "id": "legacy_native_fix_7",
+      "content": "验收通过后归档 analysis、覆盖 index.js、提交、打 tag spv4.6.4、推送发布",
+      "status": "in_progress"
     }
   ],
   "milestones": [],
   "risks": [],
   "log": [
-    {
-      "at": "2026-05-23T09:58:50.437Z",
-      "type": "created",
-      "message": "初始化项目进度"
-    },
     {
       "at": "2026-05-23T09:58:50.437Z",
       "type": "artifact_changed",
@@ -169,21 +180,87 @@
       "type": "artifact_changed",
       "refId": "plan",
       "message": "同步计划 TODO 快照：.limcode/plans/填表架构重构ai反馈合并前置分组对后续步骤透明.plan.md"
+    },
+    {
+      "at": "2026-05-27T08:08:10.021Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T08:23:04.712Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T08:41:49.510Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T09:00:45.385Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划文档：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T09:32:11.375Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T10:03:45.821Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T10:17:35.639Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T10:32:45.794Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T10:53:57.843Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T10:57:03.897Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
+    },
+    {
+      "at": "2026-05-27T11:27:34.845Z",
+      "type": "artifact_changed",
+      "refId": "plan",
+      "message": "同步计划 TODO 快照：.limcode/plans/legacy-native-read-compat-fix.md"
     }
   ],
   "stats": {
     "milestonesTotal": 0,
     "milestonesCompleted": 0,
-    "todosTotal": 6,
+    "todosTotal": 7,
     "todosCompleted": 6,
-    "todosInProgress": 0,
+    "todosInProgress": 1,
     "todosCancelled": 0,
     "activeRisks": 0
   },
   "render": {
     "rendererVersion": 1,
-    "generatedAt": "2026-05-27T03:45:01.013Z",
-    "bodyHash": "sha256:896d5d39d88e0351b7b1b7c3bc02b9aa0fb9a68e9c6d3d9e3f8d712290d54956"
+    "generatedAt": "2026-05-27T11:27:34.845Z",
+    "bodyHash": "sha256:1ff115af4e1f24b2413ebc97fdbc007d3a370efa9b51869ecf20f3661b0913a6"
   }
 }
 <!-- LIMCODE_PROGRESS_METADATA_END -->
