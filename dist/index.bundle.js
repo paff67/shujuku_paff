@@ -8258,6 +8258,40 @@ $CONTENT
         const sheets = sheetKeysForIndexing.map(key => currentJsonTableData_ACU[key]);
         let appliedEdits = 0;
         const editCountsByTable = {};
+        // [表名容错] 构建「表名 → 数字索引」查找表，兼容 AI 使用 SQL 表名或中文表名代替数字索引的情况
+        const sheetNameToIndex_ACU = {};
+        sheets.forEach((sheet, idx) => {
+            if (sheet && sheet.name) {
+                sheetNameToIndex_ACU[sheet.name] = idx; // 中文名映射，如 "广场主贴表" → 22
+            }
+            // 从 DDL 中提取 SQL 表名做映射，如 "square_posts" → 22
+            if (sheet && sheet.sourceData && sheet.sourceData.ddl) {
+                const ddlMatch = sheet.sourceData.ddl.match(/CREATE\s+TABLE\s+(\w+)/i);
+                if (ddlMatch && ddlMatch[1]) {
+                    sheetNameToIndex_ACU[ddlMatch[1]] = idx;
+                }
+            }
+        });
+        // [表名容错] 辅助函数：将可能是表名的参数解析为数字索引
+        const resolveTableNameParams_ACU = (rawParamsStr) => {
+            const rawParams = rawParamsStr.split(',').map(s => s.trim());
+            const resolved = [];
+            for (const p of rawParams) {
+                if (/^\d+$/.test(p)) {
+                    resolved.push(parseInt(p, 10));
+                    continue;
+                }
+                const cleanName = p.replace(/^["']|["']$/g, '');
+                if (sheetNameToIndex_ACU.hasOwnProperty(cleanName)) {
+                    logDebug_ACU(`[表名容错] 将表名 "${cleanName}" 解析为索引 ${sheetNameToIndex_ACU[cleanName]}`);
+                    resolved.push(sheetNameToIndex_ACU[cleanName]);
+                    continue;
+                }
+                logWarn_ACU(`[表名容错] 无法识别的 tableIndex: "${p}"`);
+                return null; // 无法解析，放弃容错
+            }
+            return resolved;
+        };
         // 指令解析函数
         const parseTableEditCommandLine_ACU = (rawLine) => {
             try {
@@ -8275,12 +8309,37 @@ $CONTENT
                 let args;
                 const firstBracket = argsString.indexOf('{');
                 if (firstBracket === -1) {
-                    args = JSON.parse(`[${argsString}]`);
+                    try {
+                        args = JSON.parse(`[${argsString}]`);
+                    }
+                    catch (_simpleParseErr) {
+                        // [表名容错] deleteRow 等简单指令可能使用了表名代替数字索引
+                        const resolved = resolveTableNameParams_ACU(argsString);
+                        if (resolved) {
+                            args = resolved;
+                        }
+                        else {
+                            throw _simpleParseErr;
+                        }
+                    }
                 }
                 else {
                     const paramsPart = argsString.substring(0, firstBracket).trim();
                     let jsonPart = argsString.substring(firstBracket);
-                    const initialArgs = JSON.parse(`[${paramsPart.replace(/,$/, '')}]`);
+                    let initialArgs;
+                    try {
+                        initialArgs = JSON.parse(`[${paramsPart.replace(/,$/, '')}]`);
+                    }
+                    catch (_paramParseErr) {
+                        // [表名容错] insertRow/updateRow 的前置参数可能使用了表名代替数字索引
+                        const resolved = resolveTableNameParams_ACU(paramsPart.replace(/,$/, ''));
+                        if (resolved) {
+                            initialArgs = resolved;
+                        }
+                        else {
+                            throw _paramParseErr;
+                        }
+                    }
                     try {
                         const jsonData = JSON.parse(jsonPart);
                         args = [...initialArgs, jsonData];
