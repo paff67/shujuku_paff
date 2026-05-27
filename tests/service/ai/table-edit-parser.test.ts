@@ -366,3 +366,82 @@ describe('parseAndApplyTableEdits_ACU — DSL 分支', () => {
     expect(mockApplyEdits).not.toHaveBeenCalled();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// parseAndApplyTableEdits_ACU — 表名容错（SQL 表名 / 中文表名代替数字索引）
+// ═══════════════════════════════════════════════════════════════
+describe('parseAndApplyTableEdits_ACU — 表名容错', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSettings = { tableEditLastPairOnly: false };
+    mockIsSqliteMode = false;
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory ( row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER )' },
+        content: [
+          ['row_id', 'item_name', 'quantity'],
+          ['1', '铁剑', '3'],
+        ],
+        updateConfig: {},
+      },
+      sheet_1: {
+        name: '广场主贴表',
+        sourceData: { ddl: 'CREATE TABLE square_posts ( row_id INTEGER PRIMARY KEY, author TEXT, content TEXT )' },
+        content: [
+          ['row_id', 'author', 'content'],
+        ],
+        updateConfig: {},
+      },
+    };
+  });
+
+  it('insertRow 使用 SQL 表名代替数字索引能正常写入', () => {
+    const aiResponse = '<tableEdit>insertRow(square_posts, {"0": "user1", "1": "hello"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const content = mockCurrentJsonTableData.sheet_1.content;
+    expect(content.length).toBe(2); // 表头 + 新插入1行
+    expect(content[1][1]).toBe('user1');
+  });
+
+  it('insertRow 使用中文表名代替数字索引能正常写入', () => {
+    const aiResponse = '<tableEdit>insertRow(广场主贴表, {"0": "user2", "1": "world"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const content = mockCurrentJsonTableData.sheet_1.content;
+    expect(content.length).toBe(2);
+  });
+
+  it('deleteRow 使用 SQL 表名代替数字索引能正常删除', () => {
+    const aiResponse = '<tableEdit>deleteRow(inventory, 0)</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const content = mockCurrentJsonTableData.sheet_0.content;
+    expect(content.length).toBe(1); // 只剩表头
+  });
+
+  it('updateRow 使用 SQL 表名代替数字索引能正常更新', () => {
+    const aiResponse = '<tableEdit>updateRow(inventory, 0, {"1": "99"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    expect(mockCurrentJsonTableData.sheet_0.content[1][2]).toBe('99');
+  });
+
+  it('数字索引仍然正常工作（回归测试）', () => {
+    const aiResponse = '<tableEdit>insertRow(0, {"0": "盾牌", "1": "1"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const content = mockCurrentJsonTableData.sheet_0.content;
+    expect(content.length).toBe(3);
+  });
+
+  it('无法识别的表名会被跳过而不崩溃', () => {
+    const aiResponse = '<tableEdit>insertRow(nonexistent_table, {"0": "test"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    // 两个表的内容应该没变
+    expect(mockCurrentJsonTableData.sheet_0.content.length).toBe(2);
+    expect(mockCurrentJsonTableData.sheet_1.content.length).toBe(1);
+  });
+});
