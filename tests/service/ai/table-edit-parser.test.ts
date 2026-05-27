@@ -445,3 +445,76 @@ describe('parseAndApplyTableEdits_ACU — 表名容错', () => {
     expect(mockCurrentJsonTableData.sheet_1.content.length).toBe(1);
   });
 });
+
+describe('parseAndApplyTableEdits_ACU — row_id 去重', () => {
+  beforeEach(() => {
+    mockSettings = { tableEditLastPairOnly: false };
+    mockIsSqliteMode = false;
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        name: '好感度表',
+        sourceData: { ddl: 'CREATE TABLE affection ( row_id INTEGER PRIMARY KEY, character_name TEXT, stage TEXT, value INTEGER, change TEXT, note TEXT )' },
+        content: [
+          ['row_id', '角色名', '好感度阶段', '好感度数值', '本轮变化', '关系备注'],
+        ],
+        updateConfig: {},
+      },
+      sheet_1: {
+        name: '广场主贴表',
+        sourceData: { ddl: 'CREATE TABLE square_posts ( row_id INTEGER PRIMARY KEY, post_id TEXT, author TEXT )' },
+        content: [
+          ['row_id', '帖子ID', '发帖账号名'],
+        ],
+        updateConfig: {},
+      },
+    };
+  });
+
+  it('AI 传入多余 row_id 时自动去重，列不错位', () => {
+    // AI 指令: data["0"]="1" (多余row_id), data["1"]="千早爱音", data["2"]="认识", ...
+    const aiResponse = '<tableEdit>insertRow(0, {"0": "1", "1": "千早爱音", "2": "认识", "3": "25", "4": "+25", "5": "互相介绍"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const row = mockCurrentJsonTableData.sheet_0.content[1];
+    // row[0] = auto row_id "1", row[1] = "千早爱音" (不是 "1")
+    expect(row[0]).toBe('1');
+    expect(row[1]).toBe('千早爱音');
+    expect(row[2]).toBe('认识');
+    expect(row[3]).toBe('25');
+    expect(row[4]).toBe('+25');
+    expect(row[5]).toBe('互相介绍');
+  });
+
+  it('AI 不传 row_id 时正常写入，不受去重影响', () => {
+    // 正常情况: data["0"]="千早爱音" (业务列), data key数 = header数
+    const aiResponse = '<tableEdit>insertRow(0, {"0": "千早爱音", "1": "认识", "2": "25", "3": "+25", "4": "互相介绍"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const row = mockCurrentJsonTableData.sheet_0.content[1];
+    expect(row[0]).toBe('1');
+    expect(row[1]).toBe('千早爱音');
+    expect(row[2]).toBe('认识');
+  });
+
+  it('多行 insertRow 均能正确去重', () => {
+    const aiResponse = '<tableEdit>\ninsertRow(0, {"0": "1", "1": "千早爱音", "2": "认识", "3": "25", "4": "+25", "5": "介绍"})\ninsertRow(0, {"0": "2", "1": "高松灯", "2": "陌生", "3": "5", "4": "+5", "5": "注意到"})\n</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const content = mockCurrentJsonTableData.sheet_0.content;
+    expect(content.length).toBe(3); // header + 2 rows
+    expect(content[1][1]).toBe('千早爱音');
+    expect(content[2][1]).toBe('高松灯');
+    // row_id 应为自动生成
+    expect(content[1][0]).toBe('1');
+    expect(content[2][0]).toBe('2');
+  });
+
+  it('data[0] 为非数字时不触发去重（正常业务数据）', () => {
+    const aiResponse = '<tableEdit>insertRow(1, {"0": "post_001", "1": "爱音"})</tableEdit>';
+    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(result).toHaveProperty('success', true);
+    const row = mockCurrentJsonTableData.sheet_1.content[1];
+    expect(row[1]).toBe('post_001');
+    expect(row[2]).toBe('爱音');
+  });
+});

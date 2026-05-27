@@ -409,6 +409,27 @@ import { getStorageProvider } from '../../table/table-storage-strategy';
                     if (table && table.content && typeof data === 'object') {
                         const newRow: any[] = [String(table.content.length)]; // 行号 = 当前 content 长度（表头占 [0]）
                         const headers = table.content[0].slice(1);
+
+                        // [row_id 去重] AI 可能在 data 对象中传入了 row_id（key=0），
+                        // 导致自动生成的 row_id 与 data[0] 形成双重序号，后续列整体右移。
+                        // 检测条件：data 的 key 数量 > headers 数量，且 data[0] 看起来像 row_id（纯数字）。
+                        // 修复方式：将 data 的 key 整体左移一位，丢弃 data[0]。
+                        const dataKeys = Object.keys(data);
+                        const numericKeys = dataKeys.filter(k => /^\d+$/.test(k)).map(Number).sort((a, b) => a - b);
+                        if (numericKeys.length > headers.length && numericKeys[0] === 0) {
+                            const val0 = String(data[0] ?? data['0'] ?? '');
+                            const autoRowId = String(table.content.length);
+                            if (/^\d+$/.test(val0) && (val0 === autoRowId || parseInt(val0, 10) >= 1)) {
+                                logWarn_ACU(`[row_id 去重] 检测到 data[0]="${val0}" 疑似多余的 row_id（auto="${autoRowId}"），将 data key 整体左移。`);
+                                const shifted: Record<string, any> = {};
+                                for (let i = 1; i <= numericKeys[numericKeys.length - 1]; i++) {
+                                    shifted[i - 1] = data[i] ?? data[String(i)] ?? '';
+                                }
+                                // 替换 data 引用
+                                Object.keys(data).forEach(k => delete data[k]);
+                                Object.assign(data, shifted);
+                            }
+                        }
                         const specialIndexCol = (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey))
                             ? getSummaryIndexColumnIndex_ACU(table)
                             : -1;
