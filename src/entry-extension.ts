@@ -91,6 +91,7 @@ import './presentation/triggers/settings-ui-sync';
 // ═══════════════════════════════════════════════════════════════
 import { mainInitialize_ACU } from './presentation/bootstrap/init';
 import { initVisualizerTemplateAssistantAddon_ACU } from './presentation/bootstrap/visualizer-template-assistant-addon';
+import { bootstrapAcuV2 } from './presentation-v2/bootstrap';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from './shared/utils';
 
 /**
@@ -176,6 +177,7 @@ async function extensionMain() {
     logDebug_ACU('[插件启动] TavernHelper 已就绪，开始初始化...');
     mainInitialize_ACU();
     initVisualizerTemplateAssistantAddon_ACU();
+    bootstrapAcuV2();
 }
 
 // 插件加载时 DOM 已就绪，直接启动

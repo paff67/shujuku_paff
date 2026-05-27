@@ -301,7 +301,11 @@ describe('buildDefaultSettings_ACU', () => {
     expect(defaults.apiConfig).toBeDefined();
     expect(defaults.apiConfig.useMainApi).toBe(true);
     expect(defaults.autoUpdateThreshold).toBe(3);
+    expect(defaults.manualUpdateContextDepth).toBeNull();
+    expect(defaults.manualUpdateBatchSize).toBeNull();
     expect(defaults.autoUpdateEnabled).toBe(true);
+    expect(defaults.continuationPageEnabled).toBe(true);
+    expect(defaults.externalImportPageEnabled).toBe(true);
     expect(defaults.maxConcurrentGroups).toBe(1);
     expect(defaults.storageMode).toBe('native');
     expect(defaults.promptTemplateSettings).toBeDefined();

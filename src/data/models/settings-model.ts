@@ -25,6 +25,8 @@ export interface Settings_ACU {
   }>;
   tableTemplate: string;
   autoUpdateEnabled: boolean;
+  continuationPageEnabled: boolean;
+  externalImportPageEnabled: boolean;
   autoUpdateThresholdNewMessages: number;
   autoUpdateThresholdInterval: number;
   tableMaxRetries: number;

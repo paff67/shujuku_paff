@@ -1,6 +1,10 @@
 import typescript from '@rollup/plugin-typescript';
 import commonjs from '@rollup/plugin-commonjs';
 import nodeResolve from '@rollup/plugin-node-resolve';
+import replace from '@rollup/plugin-replace';
+import vuePlugin from 'unplugin-vue/rollup';
+import sfcStyleInjector from './src/presentation-v2/build/rollup-sfc-style-injector.js';
+import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-transpiler.js';
 import { copyFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -52,12 +56,30 @@ const config = {
         return null;
       },
     },
+    vuePlugin({
+      isProduction: true,
+      root: process.cwd(),
+      sourceMap: false,
+      inlineTemplate: false,
+    }),
+    vueScriptTranspiler(),
+    sfcStyleInjector(),
     nodeResolve({
       browser: true,
       preferBuiltins: false,
+      extensions: ['.mjs', '.js', '.json', '.ts', '.vue'],
     }),
     commonjs(),
     createTsPlugin(),
+    replace({
+      preventAssignment: true,
+      values: {
+        'process.env.NODE_ENV': JSON.stringify('production'),
+        __VUE_OPTIONS_API__: 'true',
+        __VUE_PROD_DEVTOOLS__: 'false',
+        __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
+      },
+    }),
     {
       name: 'copy-plus-assistantembedded-manifest',
       writeBundle() {

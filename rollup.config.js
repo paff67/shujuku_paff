@@ -1,20 +1,17 @@
 /**
- * rollup.config.js — 双入口模块化构建
+ * rollup.config.js - dual entry modular build.
  *
- * 使用 @rollup/plugin-typescript 编译 TS，Rollup 做真正的模块图解析。
- *
- * 构建目标：
- * 1. 油猴脚本（默认）：IIFE 格式 + UserScript 头 → dist/index.bundle.js
- * 2. 酒馆插件：ESM 格式（无 UserScript 头）→ dist/extension/index.js
- *
- * 使用方式：
- * - npm run build          → 构建油猴脚本
- * - npm run build:extension → 构建酒馆插件
- * - npm run build:all      → 同时构建两者
+ * Build targets:
+ * 1. Userscript: IIFE + UserScript banner -> dist/index.bundle.js
+ * 2. SillyTavern extension: ESM -> dist/extension/index.js
  */
 import typescript from '@rollup/plugin-typescript';
 import commonjs from '@rollup/plugin-commonjs';
 import nodeResolve from '@rollup/plugin-node-resolve';
+import replace from '@rollup/plugin-replace';
+import vuePlugin from 'unplugin-vue/rollup';
+import sfcStyleInjector from './src/presentation-v2/build/rollup-sfc-style-injector.js';
+import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-transpiler.js';
 import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -24,9 +21,6 @@ const __dirname = dirname(__filename);
 
 const BUILD_MODE = process.env.BUILD_MODE || 'userscript';
 
-// ═══════════════════════════════════════════════════════════════
-// UserScript 头（仅油猴脚本使用）
-// ═══════════════════════════════════════════════════════════════
 const USER_SCRIPT_BANNER = `// ==UserScript==
 // @name         SP·数据库 III
 // @namespace    http://tampermonkey.net/
@@ -39,19 +33,6 @@ const USER_SCRIPT_BANNER = `// ==UserScript==
 // @注释掉的require  https://cdnjs.cloudflare.com/ajax/libs/toastr.js/latest/toastr.min.js
 // ==/UserScript==`;
 
-// ═══════════════════════════════════════════════════════════════
-// Node.js 内置模块浏览器 shim
-// sql.js (sql-asm-memory-growth.js) 内部引用了 fs 和 crypto：
-//   var fs = require('fs')       → require$$0
-//   var a  = require('crypto')   → require$$1（用于 randomFillSync）
-// 浏览器环境下这些代码路径不会真正执行（被 typeof process 条件分支保护），
-// 但 Rollup commonjs 插件会把 require() 调用提升为 IIFE 形参，
-// 导致浏览器运行时出现 ReferenceError: require$$0 is not defined。
-// 解决方式：在 Rollup 解析阶段将 fs/crypto 替换为空模块 shim。
-//
-// 必须同时拦截裸名 (fs/crypto) 和 node: 前缀 (node:fs/node:crypto) 两种形式，
-// 因为 sql.js 内部使用裸名 require('fs')，而部分工具链可能用 node: 前缀。
-// ═══════════════════════════════════════════════════════════════
 const nodeBuiltinsShim = {
   name: 'node-builtins-shim',
   resolveId(source) {
@@ -74,14 +55,36 @@ const nodeBuiltinsShim = {
   },
 };
 
-// ═══════════════════════════════════════════════════════════════
-// 共享插件配置
-// ═══════════════════════════════════════════════════════════════
+function createVuePlugin() {
+  return vuePlugin({
+    isProduction: true,
+    root: process.cwd(),
+    sourceMap: false,
+    inlineTemplate: false,
+  });
+}
+
+function createReplacePlugin() {
+  return replace({
+    preventAssignment: true,
+    values: {
+      'process.env.NODE_ENV': JSON.stringify('production'),
+      __VUE_OPTIONS_API__: 'true',
+      __VUE_PROD_DEVTOOLS__: 'false',
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
+    },
+  });
+}
+
 const sharedPlugins = [
   nodeBuiltinsShim,
+  createVuePlugin(),
+  vueScriptTranspiler(),
+  sfcStyleInjector(),
   nodeResolve({
     browser: true,
     preferBuiltins: false,
+    extensions: ['.mjs', '.js', '.json', '.ts', '.vue'],
   }),
   commonjs(),
 ];
@@ -106,9 +109,6 @@ const sharedOnWarn = (warning, warn) => {
   warn(warning);
 };
 
-// ═══════════════════════════════════════════════════════════════
-// 油猴脚本构建配置
-// ═══════════════════════════════════════════════════════════════
 const userscriptConfig = {
   input: 'src/index.ts',
   output: {
@@ -118,7 +118,7 @@ const userscriptConfig = {
     sourcemap: false,
   },
   treeshake: false,
-  plugins: [...sharedPlugins, createTsPlugin()],
+  plugins: [...sharedPlugins, createTsPlugin(), createReplacePlugin()],
   external: [
     './script.js',
     './scripts/extensions.js',
@@ -126,9 +126,6 @@ const userscriptConfig = {
   onwarn: sharedOnWarn,
 };
 
-// ═══════════════════════════════════════════════════════════════
-// 酒馆插件构建配置
-// ═══════════════════════════════════════════════════════════════
 const extensionConfig = {
   input: 'src/entry-extension.ts',
   output: {
@@ -140,9 +137,7 @@ const extensionConfig = {
   plugins: [
     ...sharedPlugins,
     createTsPlugin(),
-    // 构建完成后生成标准 extension 产物，并同步根目录直装文件。
-    // SillyTavern 直装读取仓库根目录 manifest.json 中的 js: "index.js"，
-    // 所以 extension 构建成功后必须让根目录 index.js 始终等于 dist/extension/index.js。
+    createReplacePlugin(),
     {
       name: 'sync-extension-artifacts',
       writeBundle() {
@@ -173,8 +168,6 @@ const extensionConfig = {
       },
     },
   ],
-  // 油猴分支的 import('./script.js') 等代码在插件构建中不会运行时执行，
-  // 但 Rollup 仍会尝试解析。标记为 external 让 Rollup 跳过解析。
   external: [
     './script.js',
     './scripts/extensions.js',
@@ -182,9 +175,6 @@ const extensionConfig = {
   onwarn: sharedOnWarn,
 };
 
-// ═══════════════════════════════════════════════════════════════
-// 根据 BUILD_MODE 选择构建目标
-// ═══════════════════════════════════════════════════════════════
 let configs;
 switch (BUILD_MODE) {
   case 'extension':
@@ -194,7 +184,6 @@ switch (BUILD_MODE) {
     configs = [userscriptConfig, extensionConfig];
     break;
   case 'concat':
-    // 保留原有的 concat 模式兼容
     configs = userscriptConfig;
     break;
   case 'userscript':

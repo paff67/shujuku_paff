@@ -563,6 +563,8 @@ export   function buildDefaultSettings_ACU() {
           tavernProfile: '',
           streamingEnabled: false, // [新增] 流式传输开关（默认关闭）
           apiPresets: [] as any[],
+          defaultApiPresetName: '',
+          apiPresetBindingsByChat: {} as Record<string, { presetName: string; updatedAt: number }>,
           tableApiPreset: '',
           plotApiPreset: '',
           // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
@@ -576,9 +578,13 @@ export   function buildDefaultSettings_ACU() {
           autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
           updateBatchSize: 3,
+          manualUpdateContextDepth: null as number | null,
+          manualUpdateBatchSize: null as number | null,
           maxConcurrentGroups: 1,
           autoUpdateEnabled: true,
           standardizedTableFillEnabled: true, // [新增] 规范填表功能
+          continuationPageEnabled: true, // [新增] 智能续写页显示开关
+          externalImportPageEnabled: true, // [新增] 外部导入页显示开关
           toastMuteEnabled: false,
           // [剧情推进] 设置
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
@@ -633,6 +639,8 @@ export   function buildDefaultSettings_ACU() {
           // [新增] 正文优化功能
           contentOptimizationSettings: {
             enabled: false,                    // 是否启用正文优化
+            enabledSwitchTouched: false,       // v2 仪表盘正文替换开关是否被用户操作过
+            enabledPreference: false,          // v2 仪表盘正文替换开关的用户偏好
             apiPreset: '',                     // 优化使用的API预设（为空则使用当前配置）
             seamlessMode: true,                // 无感替换模式：显示遮罩，优化完成后直接显示结果
             autoApply: true,                   // 是否自动应用优化结果（关闭时显示对比让用户选择）

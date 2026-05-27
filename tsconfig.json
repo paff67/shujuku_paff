@@ -21,14 +21,16 @@
       "@shared/*": ["src/shared/*"],
       "@data/*": ["src/data/*"],
       "@service/*": ["src/service/*"],
-      "@presentation/*": ["src/presentation/*"]
+      "@presentation/*": ["src/presentation/*"],
+      "@presentation-v2/*": ["src/presentation-v2/*"]
     },
-    "types": ["function", "iframe", "jquery", "sql-js"],
+    "types": ["function", "iframe", "jquery", "sql-js", "vue-shim"],
     "typeRoots": ["./@types", "./node_modules/@types"]
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.js",
+    "src/**/*.vue",
     "@types/**/*.d.ts"
   ],
   "exclude": [

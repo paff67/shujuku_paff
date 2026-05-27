@@ -13,6 +13,7 @@ const {
   mockGetLorebookEntries, mockDeleteLorebookEntries, mockGwGetCurrentCharPrimaryLorebook, mockListLorebooks,
   mockGetChatArray, mockSaveChatToHost,
   mockApplyTemplateScopeForCurrentChat, mockLoadSettings, mockSaveSettings,
+  mockApplyCurrentChatApiPresetSelection,
   mockGetSortedSheetKeys,
   mockLoadAllChatMessages,
   mockCleanChatName, mockGetChatFirstLayerMessage, mockLogDebug, mockLogError, mockLogWarn,
@@ -49,6 +50,7 @@ const {
   mockApplyTemplateScopeForCurrentChat: vi.fn(),
   mockLoadSettings: vi.fn(),
   mockSaveSettings: vi.fn(),
+  mockApplyCurrentChatApiPresetSelection: vi.fn(),
   mockGetSortedSheetKeys: vi.fn(() => []),
   mockLoadAllChatMessages: vi.fn(async () => {}),
   mockCleanChatName: vi.fn((name: string) => name),
@@ -97,6 +99,10 @@ vi.mock('../../../src/service/settings/settings-service', () => ({
   saveSettings_ACU: mockSaveSettings,
 }));
 
+vi.mock('../../../src/service/ai/api-call', () => ({
+  applyCurrentChatApiPresetSelection_ACU: mockApplyCurrentChatApiPresetSelection,
+}));
+
 vi.mock('../../../src/service/template/chat-scope', () => ({
   getSortedSheetKeys_ACU: mockGetSortedSheetKeys,
 }));
@@ -133,6 +139,7 @@ beforeEach(() => {
   mockSettings.dataIsolationEnabled = false;
   mockSettings.dataIsolationCode = '';
   mockSettings.knownCustomEntryNames = [];
+  mockListLorebooks.mockResolvedValue(['primary-lorebook', '角色世界书', '自定义世界书']);
   mockCurrentChatFileIdentifier.value = 'test-chat';
   mockCurrentJsonTableData.value = null;
   mockGenerationGate.lastUserMessageId = null;
@@ -193,6 +200,7 @@ describe('resetScriptStateForNewChat_ACU', () => {
     await resetScriptStateForNewChat_ACU('new-chat.jsonl');
     expect(mockSetCurrentChatFileIdentifier).toHaveBeenCalledWith('clean-chat');
     expect(mockLoadSettings).toHaveBeenCalled();
+    expect(mockApplyCurrentChatApiPresetSelection).toHaveBeenCalled();
     expect(mockSetAllChatMessages).toHaveBeenCalledWith([]);
     expect(mockSetLastTotalAiMessages).toHaveBeenCalledWith(0);
     expect(mockLoadAllChatMessages).toHaveBeenCalled();
