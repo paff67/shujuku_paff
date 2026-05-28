@@ -14,6 +14,7 @@ import {
   processUpdatesBatch_ACU,
   type BatchUpdateProgressContext,
   type CardUpdateProgressEvent,
+  type ExecuteCardUpdateOptions_ACU,
 } from '../../service/table/update-orchestrator';
 import { useToastStore } from '../stores/toast-store';
 
@@ -122,9 +123,12 @@ function progressLabel(event: CardUpdateProgressEvent): string {
   const prefix = event.currentBatch && event.totalBatches
     ? `批次 ${event.currentBatch}/${event.totalBatches} · `
     : '';
+  if (event.message && event.phase !== 'retry' && event.phase !== 'error') {
+    return `${prefix}${normalizeManualProgressMessage(event.message)}`;
+  }
   switch (event.phase) {
     case 'preparing': return `${prefix}准备上下文`;
-    case 'calling_ai': return `${prefix}调用 AI${event.attempt ? ` (${event.attempt}/${event.maxRetries || '?'})` : ''}`;
+    case 'calling_ai': return `${prefix}调用 AI${event.attempt ? `（第 ${event.attempt}/${event.maxRetries || '?'} 次尝试）` : ''}`;
     case 'parsing': return `${prefix}解析填表结果`;
     case 'saving': return `${prefix}保存表格数据`;
     case 'retry': return `${prefix}重试中${event.message ? `:${event.message}` : ''}`;
@@ -133,6 +137,12 @@ function progressLabel(event: CardUpdateProgressEvent): string {
     case 'error': return `${prefix}出错${event.message ? `:${event.message}` : ''}`;
     default: return prefix || '处理中';
   }
+}
+
+function normalizeManualProgressMessage(message: string): string {
+  return message
+    .split(' AI 响应').join('手动填表结果')
+    .split('AI 响应').join('手动填表结果');
 }
 
 export function useManualUpdate(): ManualUpdateState {
@@ -232,6 +242,9 @@ export function useManualUpdate(): ManualUpdateState {
     notifyProgress('手动填表开始。');
     const extra = manualExtraHint.value.trim();
     if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
+    const handleProgress = (event: CardUpdateProgressEvent) => {
+      notifyProgress(progressLabel(event));
+    };
 
     const runProcessBatch = (indices: number[], mode: string, options: any) =>
       processUpdatesBatch_ACU(indices, mode, options, (
@@ -242,6 +255,7 @@ export function useManualUpdate(): ManualUpdateState {
         targetSheetKeys: string[] | null,
         requestOptions: Record<string, any> | null,
         progressContext: BatchUpdateProgressContext,
+        executionOptions?: ExecuteCardUpdateOptions_ACU,
       ) => executeCardUpdateCore_ACU(
         messagesToUse,
         saveTargetIndex,
@@ -252,9 +266,8 @@ export function useManualUpdate(): ManualUpdateState {
         requestOptions,
         new AbortController(),
         progressContext,
-        (event) => {
-          notifyProgress(progressLabel(event));
-        },
+        handleProgress,
+        executionOptions || {},
       ));
 
     try {
@@ -269,6 +282,7 @@ export function useManualUpdate(): ManualUpdateState {
           runProcessBatch,
           async () => { await reloadStorageProvider(); },
           { clearBeforeUpdate },
+          handleProgress,
         );
       } finally {
         restoreAutoUpdateSettings();

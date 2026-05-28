@@ -1546,8 +1546,6 @@ export async function orchestrateManualUpdate_ACU(
                     groupKey: item.groupKey,
                     groupOrder: item.groupOrder,
                     prepareAiCallOnly: true,
-                    deferApply: true,
-                    deferPersistence: true,
                 });
 
                 if (!prepareResult.success) {

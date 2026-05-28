@@ -1245,6 +1245,14 @@ describe('orchestrateManualUpdate_ACU', () => {
     );
     expect(result.success).toBe(true);
     expect(mockProcessBatch).toHaveBeenCalled();
+    const prepareOptions = mockProcessBatch.mock.calls[0][2];
+    expect(prepareOptions).toEqual(expect.objectContaining({
+      prepareAiCallOnly: true,
+      targetSheetKeys: ['sheet_0'],
+      batchSize: 2,
+    }));
+    expect(prepareOptions.deferApply).toBeUndefined();
+    expect(prepareOptions.deferPersistence).toBeUndefined();
     const callingAiEvent = progressEvents.find(event => event.phase === 'calling_ai');
     expect(callingAiEvent).toEqual(expect.objectContaining({ currentBatch: 1, totalBatches: 1 }));
   });

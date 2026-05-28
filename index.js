@@ -7419,18 +7419,18 @@ $CONTENT
         const trackingKeySet = new Set(Array.isArray(trackingSheetKeys)
             ? trackingSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)
             : []);
-        const keysToTrackAsUpdated = Array.from(trackingKeySet);
-        if (trackAsUpdate && keysToTrackAsUpdated.length > 0) {
+        const actuallyModifiedKeys = keysToSave.filter(sheetKey => trackingKeySet.has(sheetKey));
+        if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
             const existingModifiedKeys = currentTagData.modifiedKeys || [];
-            currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...keysToTrackAsUpdated])];
+            currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...actuallyModifiedKeys])];
             logDebug_ACU(`[Tracking] Recorded modified keys for tag [${currentIsolationKey || '无标签'}] at index ${finalIndex}: ${currentTagData.modifiedKeys.join(', ')}`);
         }
-        if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && keysToTrackAsUpdated.length > 0) {
+        if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length > 0) {
             const existingGroupKeys = currentTagData.updateGroupKeys || [];
             currentTagData.updateGroupKeys = [...new Set([...existingGroupKeys, ...updateGroupKeys])];
             logDebug_ACU(`[Merge Update Success] Group keys for tag [${currentIsolationKey || '无标签'}] recorded at index ${finalIndex}: ${currentTagData.updateGroupKeys.join(', ')}`);
         }
-        else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && keysToTrackAsUpdated.length === 0) {
+        else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length === 0) {
             logDebug_ACU(`[Merge Update Failed] No tables were modified for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
         }
         const isolationConfig = {
@@ -7467,8 +7467,8 @@ $CONTENT
             before: resolvedBeforeData,
             after: resolvedAfterData,
             targetSheetKeys: keysToSave,
-            modifiedKeys: trackAsUpdate ? keysToTrackAsUpdated : [],
-            updateGroupKeys: trackAsUpdate && keysToTrackAsUpdated.length > 0 ? (updateGroupKeys || []) : [],
+            modifiedKeys: trackAsUpdate ? actuallyModifiedKeys : [],
+            updateGroupKeys: trackAsUpdate && actuallyModifiedKeys.length > 0 ? (updateGroupKeys || []) : [],
             isolationKey: currentIsolationKey,
             targetMessageIndex: finalIndex,
             baseCheckpointId: baseCheckpoint?.checkpointId,
@@ -7486,7 +7486,7 @@ $CONTENT
         }
         writeMessageIdentity_ACU(targetMessage, isolationConfig);
         clearCurrentIsolationLegacyTableSnapshots_ACU(targetMessage, currentIsolationKey, isolationConfig);
-        logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Tracked updated: ${keysToTrackAsUpdated.length} tables. Delta written: ${!!delta}.`);
+        logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables. Delta written: ${!!delta}.`);
         await saveChatToHost_ACU();
         return { saved: true, messageIndex: finalIndex };
     }
@@ -32681,14 +32681,7 @@ $CONTENT
                             logDebug_ACU('[Init] First time initialization detected. Saving complete template structure with all tables.');
                         }
                         const updateGroupKeysRaw = isFirstTimeInit ? keysToPersist : targetSheetKeys;
-                        const hasActualTargetModification = keysToPersist.length > 0;
-                        let keysToTrackAsUpdated = keysToPersist.filter((sheetKey) => keysToActuallySave.includes(sheetKey));
-                        // 首次初始化是全量模板结构落盘，不代表 AI 对同组表做了更新决策；
-                        // 因此仅后续非初始化更新才将 targetSheetKeys 整组推进 tracking，
-                        // 使同组参与表在下一层计数中被识别为已在本层更新。
-                        if (!isFirstTimeInit && Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0 && hasActualTargetModification) {
-                            keysToTrackAsUpdated = Array.from(new Set(targetSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)));
-                        }
+                        const keysToTrackAsUpdated = keysToPersist.filter((sheetKey) => keysToActuallySave.includes(sheetKey));
                         const updateGroupKeysToUse = Array.isArray(updateGroupKeysRaw)
                             ? updateGroupKeysRaw.filter(sheetKey => {
                                 const table = currentJsonTableData_ACU?.[sheetKey];
@@ -33011,7 +33004,7 @@ $CONTENT
      * 将 round 内多 group 的修改按各自 saveTargetIndex 分桶。
      *
      * round 内 AI 响应仍然合并 apply 一次，但持久化必须回到每个 group 对应的楼层。
-     * targetSheetKeys 仅记录实际修改表；当组内存在实际修改时，tracking/updateGroup 记录整组参与表。
+     * 这里只记录实际修改过的 sheet，避免 updateGroupKeys 把未修改表误判为已更新。
      */
     function buildRoundPersistenceTargets_ACU(roundItems, modifiedKeys) {
         if (!Array.isArray(roundItems) || roundItems.length === 0 || !Array.isArray(modifiedKeys) || modifiedKeys.length === 0) {
@@ -33034,8 +33027,8 @@ $CONTENT
                 trackingSheetKeys: [],
             };
             existing.targetSheetKeys = unionStrings_ACU(existing.targetSheetKeys, changedSheetKeys);
-            existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, groupSheetKeys);
-            existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, groupSheetKeys);
+            existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, changedSheetKeys);
+            existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, changedSheetKeys);
             targetsByIndex.set(targetMessageIndex, existing);
         }
         return Array.from(targetsByIndex.values()).sort((a, b) => a.targetMessageIndex - b.targetMessageIndex);
@@ -33276,8 +33269,6 @@ $CONTENT
                         groupKey: item.groupKey,
                         groupOrder: item.groupOrder,
                         prepareAiCallOnly: true,
-                        deferApply: true,
-                        deferPersistence: true,
                     });
                     if (!prepareResult.success) {
                         failedGroups.push({
@@ -33387,13 +33378,8 @@ $CONTENT
                 const persistenceTargets = buildRoundPersistenceTargets_ACU(roundItems, applyResult.modifiedKeys);
                 if (failedGroups.length === 0) {
                     onProgress?.({ phase: 'saving', currentBatch: roundNumber, totalBatches: totalRounds, message: '正在保存合并后的更新到聊天记录...' });
-                    if (persistenceTargets.length === 0 && applyResult.modifiedKeys.length > 0) {
-                        // 有修改的表但没有可持久化的楼层，说明 buildRoundPersistenceTargets_ACU 内部出错，这是真正的失败
+                    if (persistenceTargets.length === 0) {
                         failedGroups.push({ key: roundItems[0].groupKey, error: '合并编辑成功但没有可持久化的目标楼层。' });
-                    }
-                    else if (persistenceTargets.length === 0) {
-                        // 完全无修改，跳过持久化，正常继续。这是正常业务路径，不是失败
-                        logDebug_ACU(`[Manual] Round ${roundNumber} 无实际表修改，跳过持久化。`);
                     }
                     const savedTargetIndices = [];
                     for (const target of persistenceTargets) {
@@ -81036,9 +81022,12 @@ Expected function or array of functions, received type ${typeof value}.`
         const prefix = event.currentBatch && event.totalBatches
             ? `批次 ${event.currentBatch}/${event.totalBatches} · `
             : '';
+        if (event.message && event.phase !== 'retry' && event.phase !== 'error') {
+            return `${prefix}${normalizeManualProgressMessage(event.message)}`;
+        }
         switch (event.phase) {
             case 'preparing': return `${prefix}准备上下文`;
-            case 'calling_ai': return `${prefix}调用 AI${event.attempt ? ` (${event.attempt}/${event.maxRetries || '?'})` : ''}`;
+            case 'calling_ai': return `${prefix}调用 AI${event.attempt ? `（第 ${event.attempt}/${event.maxRetries || '?'} 次尝试）` : ''}`;
             case 'parsing': return `${prefix}解析填表结果`;
             case 'saving': return `${prefix}保存表格数据`;
             case 'retry': return `${prefix}重试中${event.message ? `:${event.message}` : ''}`;
@@ -81047,6 +81036,11 @@ Expected function or array of functions, received type ${typeof value}.`
             case 'error': return `${prefix}出错${event.message ? `:${event.message}` : ''}`;
             default: return prefix || '处理中';
         }
+    }
+    function normalizeManualProgressMessage(message) {
+        return message
+            .split(' AI 响应').join('手动填表结果')
+            .split('AI 响应').join('手动填表结果');
     }
     function useManualUpdate() {
         const toast = useToastStore();
@@ -81135,9 +81129,10 @@ Expected function or array of functions, received type ${typeof value}.`
             const extra = manualExtraHint.value.trim();
             if (extra)
                 _set_manualExtraHint_ACU$1(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
-            const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, (event) => {
+            const handleProgress = (event) => {
                 notifyProgress(progressLabel$1(event));
-            }));
+            };
+            const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext, executionOptions) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress, executionOptions || {}));
             try {
                 const clearBeforeUpdate = typeof window !== 'undefined' && typeof window.confirm === 'function'
                     ? window.confirm('手动填表前是否清空目标楼层中这些表的旧数据?SQLite 模式下建议清空。')
@@ -81145,7 +81140,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
                 let result;
                 try {
-                    result = await orchestrateManualUpdate_ACU(selectedManualTableKeys.value, runProcessBatch, async () => { await reloadStorageProvider(); }, { clearBeforeUpdate });
+                    result = await orchestrateManualUpdate_ACU(selectedManualTableKeys.value, runProcessBatch, async () => { await reloadStorageProvider(); }, { clearBeforeUpdate }, handleProgress);
                 }
                 finally {
                     restoreAutoUpdateSettings();
