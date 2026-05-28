@@ -119,11 +119,22 @@ import { getStorageProvider } from '../../table/table-storage-strategy';
         return true;
     }
 
-    // [新增] SQLite 模式：检测是否为 SQL 语句，是则走 SQL 执行路径
-    if (isSqliteMode() && isSqlContent(editsString)) {
+    // SQLite 模式强制 SQL-only：
+    // 1) 允许 AI 在 <tableEdit> 内混入少量说明文字时，从第一条真正的 SQL 语句开始截取执行；
+    // 2) 不再静默回落到 insertRow/updateRow/deleteRow DSL，避免 SQLite 表结构下出现列错位和 row_id 重复。
+    if (isSqliteMode()) {
+        const sqlPayload = extractSqlPayload_ACU(editsString);
+        if (!sqlPayload) {
+            const hasDslCommands = /\b(insertRow|updateRow|deleteRow)\s*\(/i.test(editsString);
+            const message = hasDslCommands
+                ? '[SQL Mode] SQLite 模式下 <tableEdit> 只能使用 SQL 语句（INSERT/UPDATE/DELETE），不能使用 insertRow/updateRow/deleteRow。'
+                : '[SQL Mode] SQLite 模式下 <tableEdit> 未检测到可执行 SQL 语句。';
+            logError_ACU(message);
+            throw new Error(message);
+        }
         try {
             const provider = getStorageProvider();
-            const result = provider.applyEdits(editsString, updateMode);
+            const result = provider.applyEdits(sqlPayload, updateMode);
             logDebug_ACU(`[SQL Mode] applyEdits 完成: success=${result.success}, appliedEdits=${result.appliedEdits}, modifiedKeys=${result.modifiedKeys.join(',')}`);
             return result;
         } catch (e: any) {
@@ -601,4 +612,40 @@ import { getStorageProvider } from '../../table/table-storage-strategy';
       return sqlKeywords.test(trimmed);
     }
     return false;
+  }
+
+  /**
+   * 从 <tableEdit> 内容中提取真正的 SQL payload。
+   * AI 偶尔会在 SQL 前写说明/推理文字，旧逻辑会因此误判为非 SQL 并回落到 DSL parser。
+   * 这里只匹配具备最小结构的 SQL 起点，避免把“请使用 INSERT INTO / UPDATE ...”这类说明文字当成语句。
+   */
+  export function extractSqlPayload_ACU(content: string): string | null {
+    if (typeof content !== 'string') return null;
+    const normalized = content.replace(/<!--|-->/g, '').trim();
+    if (!normalized) return null;
+
+    const sqlStartRe = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|REPLACE\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|UPDATE\s+(?:OR\s+\w+\s+)?[`"'\[]?[\w\u4e00-\u9fff][\w\u4e00-\u9fff`"'\]\[]*\s+SET\b|DELETE\s+FROM\s+[`"'\[]?[\w\u4e00-\u9fff]|ALTER\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|CREATE\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|DROP\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|BEGIN(?:\s+TRANSACTION)?\b)/i;
+    const match = sqlStartRe.exec(normalized);
+    if (!match || typeof match.index !== 'number') return null;
+
+    let payload = normalized.slice(match.index).trim();
+    payload = payload.replace(/\s*<\/(?:tableEdit|content|output)>[\s\S]*$/i, '').trim();
+    payload = payload.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    payload = payload.replace(/;\s*["'`]\s*$/g, ';').trim();
+
+    return isSqlContent(payload) && looksExecutableSqlPayload_ACU(payload) ? payload : null;
+  }
+
+  function looksExecutableSqlPayload_ACU(payload: string): boolean {
+    const trimmed = payload.trim();
+    if (/^(INSERT|REPLACE)\s+(?:OR\s+\w+\s+)?INTO\b/i.test(trimmed)) {
+      return /\b(VALUES|SELECT)\b/i.test(trimmed);
+    }
+    if (/^UPDATE\s+(?:OR\s+\w+\s+)?/i.test(trimmed)) {
+      return /\bSET\b/i.test(trimmed);
+    }
+    if (/^DELETE\s+FROM\b/i.test(trimmed)) {
+      return /\bWHERE\b/i.test(trimmed) || /;\s*$/.test(trimmed);
+    }
+    return /^(ALTER|BEGIN|CREATE|DROP)\b/i.test(trimmed);
   }

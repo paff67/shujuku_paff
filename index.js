@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 III
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      3.7.3
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -8180,11 +8180,22 @@ $CONTENT
             logDebug_ACU('Empty <tableEdit> block. No edits to apply.');
             return true;
         }
-        // [新增] SQLite 模式：检测是否为 SQL 语句，是则走 SQL 执行路径
-        if (isSqliteMode() && isSqlContent(editsString)) {
+        // SQLite 模式强制 SQL-only：
+        // 1) 允许 AI 在 <tableEdit> 内混入少量说明文字时，从第一条真正的 SQL 语句开始截取执行；
+        // 2) 不再静默回落到 insertRow/updateRow/deleteRow DSL，避免 SQLite 表结构下出现列错位和 row_id 重复。
+        if (isSqliteMode()) {
+            const sqlPayload = extractSqlPayload_ACU(editsString);
+            if (!sqlPayload) {
+                const hasDslCommands = /\b(insertRow|updateRow|deleteRow)\s*\(/i.test(editsString);
+                const message = hasDslCommands
+                    ? '[SQL Mode] SQLite 模式下 <tableEdit> 只能使用 SQL 语句（INSERT/UPDATE/DELETE），不能使用 insertRow/updateRow/deleteRow。'
+                    : '[SQL Mode] SQLite 模式下 <tableEdit> 未检测到可执行 SQL 语句。';
+                logError_ACU(message);
+                throw new Error(message);
+            }
             try {
                 const provider = getStorageProvider();
-                const result = provider.applyEdits(editsString, updateMode);
+                const result = provider.applyEdits(sqlPayload, updateMode);
                 logDebug_ACU(`[SQL Mode] applyEdits 完成: success=${result.success}, appliedEdits=${result.appliedEdits}, modifiedKeys=${result.modifiedKeys.join(',')}`);
                 return result;
             }
@@ -8682,6 +8693,40 @@ $CONTENT
             return sqlKeywords.test(trimmed);
         }
         return false;
+    }
+    /**
+     * 从 <tableEdit> 内容中提取真正的 SQL payload。
+     * AI 偶尔会在 SQL 前写说明/推理文字，旧逻辑会因此误判为非 SQL 并回落到 DSL parser。
+     * 这里只匹配具备最小结构的 SQL 起点，避免把“请使用 INSERT INTO / UPDATE ...”这类说明文字当成语句。
+     */
+    function extractSqlPayload_ACU(content) {
+        if (typeof content !== 'string')
+            return null;
+        const normalized = content.replace(/<!--|-->/g, '').trim();
+        if (!normalized)
+            return null;
+        const sqlStartRe = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|REPLACE\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|UPDATE\s+(?:OR\s+\w+\s+)?[`"'\[]?[\w\u4e00-\u9fff][\w\u4e00-\u9fff`"'\]\[]*\s+SET\b|DELETE\s+FROM\s+[`"'\[]?[\w\u4e00-\u9fff]|ALTER\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|CREATE\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|DROP\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|BEGIN(?:\s+TRANSACTION)?\b)/i;
+        const match = sqlStartRe.exec(normalized);
+        if (!match || typeof match.index !== 'number')
+            return null;
+        let payload = normalized.slice(match.index).trim();
+        payload = payload.replace(/\s*<\/(?:tableEdit|content|output)>[\s\S]*$/i, '').trim();
+        payload = payload.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+        payload = payload.replace(/;\s*["'`]\s*$/g, ';').trim();
+        return isSqlContent(payload) && looksExecutableSqlPayload_ACU(payload) ? payload : null;
+    }
+    function looksExecutableSqlPayload_ACU(payload) {
+        const trimmed = payload.trim();
+        if (/^(INSERT|REPLACE)\s+(?:OR\s+\w+\s+)?INTO\b/i.test(trimmed)) {
+            return /\b(VALUES|SELECT)\b/i.test(trimmed);
+        }
+        if (/^UPDATE\s+(?:OR\s+\w+\s+)?/i.test(trimmed)) {
+            return /\bSET\b/i.test(trimmed);
+        }
+        if (/^DELETE\s+FROM\b/i.test(trimmed)) {
+            return /\bWHERE\b/i.test(trimmed) || /;\s*$/.test(trimmed);
+        }
+        return /^(ALTER|BEGIN|CREATE|DROP)\b/i.test(trimmed);
     }
 
     /**
@@ -11670,18 +11715,46 @@ $CONTENT
         /**
          * 执行 SQL 查询（SELECT）
          *
-         * 注意：不触发 _ensureTablesFromTemplate()。
-         * 新开卡场景下表尚未创建，查询会抛出 "no such table" 错误——这是预期行为。
-         * 建表只在写操作（applyEdits/executeMutation）时触发，确保用户有机会在首次填表前修改表结构。
+         * 查询优先直接执行；如果新开卡/空库下命中 "no such table"，则按当前聊天模板建表并重试一次。
+         * 这样 <if db>/<if sql>、世界书条件和剧情条件模板可以在首次填表前安全求值，
+         * 同时仍然只在确实查询到缺失表时才锁定当前聊天模板结构。
          */
         executeQuery(sql, params) {
             this._ensureInitialized();
-            const result = this.engine.query(sql, params);
+            this._ensureTablesForQuery(sql);
+            let result;
+            try {
+                result = this.engine.query(sql, params);
+            }
+            catch (e) {
+                if (!isNoSuchTableError_ACU(e))
+                    throw e;
+                logWarn_ACU(`[SqlTableService] 查询命中缺失表，按当前模板建表后重试: ${e?.message || String(e)}`);
+                this._ensureTablesFromTemplate();
+                result = this.engine.query(sql, params);
+            }
             return {
                 columns: result.columns,
                 values: result.values,
                 rowCount: result.values.length,
             };
+        }
+        /**
+         * 查询条件模板/世界书条件在新开卡时经常先于首次写表执行。
+         * 先从 SELECT 中预扫 FROM/JOIN 表名；如果命中当前库里还没有的表，
+         * 直接按当前聊天模板建表，避免 SqliteEngine 先打出一条 no such table 错误日志。
+         * catch 分支仍保留，兜底处理复杂 SQL/正则未覆盖的表名提取场景。
+         */
+        _ensureTablesForQuery(sql) {
+            const referencedTables = extractTableNamesFromQuery_ACU(sql);
+            if (referencedTables.length === 0)
+                return;
+            const existingTables = new Set(this.engine.getTableNames());
+            const missingReferencedTables = referencedTables.filter(name => !existingTables.has(name));
+            if (missingReferencedTables.length === 0)
+                return;
+            logDebug_ACU(`[SqlTableService] 查询预扫发现缺失表，按当前模板建表后再执行: ${missingReferencedTables.join(', ')}`);
+            this._ensureTablesFromTemplate();
         }
         /**
          * 执行 SQL 变更语句（INSERT/UPDATE/DELETE）
@@ -12042,6 +12115,30 @@ $CONTENT
             }
         }
         return Array.from(tableNames);
+    }
+    function isNoSuchTableError_ACU(error) {
+        const message = String(error?.message || error || '');
+        return /no such table/i.test(message);
+    }
+    function extractTableNamesFromQuery_ACU(sql) {
+        if (typeof sql !== 'string' || !sql.trim())
+            return [];
+        const withoutStrings = sql
+            .replace(/'([^']|'')*'/g, "''")
+            .replace(/"([^"]|"")*"/g, '""');
+        const tableNames = new Set();
+        const tableRefPattern = /\b(?:FROM|JOIN)\s+(?!\()(?:(?:main|temp)\.)?[`"\[]?([A-Za-z_][A-Za-z0-9_]*)[`"\]]?/gi;
+        let match;
+        while ((match = tableRefPattern.exec(withoutStrings)) !== null) {
+            const tableName = match[1];
+            if (!tableName || isBuiltinSqliteTable_ACU(tableName))
+                continue;
+            tableNames.add(tableName);
+        }
+        return Array.from(tableNames);
+    }
+    function isBuiltinSqliteTable_ACU(tableName) {
+        return /^(sqlite_master|sqlite_schema|sqlite_sequence)$/i.test(tableName);
     }
 
     /**
@@ -16463,8 +16560,12 @@ $CONTENT
             Object.keys(mergedData).forEach((sheetKey) => {
                 if (mergedData[sheetKey] && mergedData[sheetKey].content && Array.isArray(mergedData[sheetKey].content)) {
                     const table = mergedData[sheetKey];
+                    const headerRow = Array.isArray(table.content[0]) ? table.content[0] : [];
+                    const summaryIndexCol = headerRow.findIndex((h) => String(h ?? '').trim() === '编码索引');
+                    const amCodeCol = summaryIndexCol >= 0 ? summaryIndexCol : 1;
                     table.content.slice(1).forEach((row, idx) => {
-                        if (row && row.length > 1 && row[1] && row[1].startsWith('AM') && row[row.length - 1] !== 'auto_merged') {
+                        const amCode = String(row?.[amCodeCol] ?? '');
+                        if (row && row.length > amCodeCol && amCode.startsWith('AM') && row[row.length - 1] !== 'auto_merged') {
                             // 发现AM开头的条目缺少auto_merged标记，自动修复
                             row.push('auto_merged');
                             integrityFixed = true;

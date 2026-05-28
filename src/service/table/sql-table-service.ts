@@ -313,18 +313,45 @@ export class SqlTableService implements ITableStorageProvider {
   /**
    * 执行 SQL 查询（SELECT）
    *
-   * 注意：不触发 _ensureTablesFromTemplate()。
-   * 新开卡场景下表尚未创建，查询会抛出 "no such table" 错误——这是预期行为。
-   * 建表只在写操作（applyEdits/executeMutation）时触发，确保用户有机会在首次填表前修改表结构。
+   * 查询优先直接执行；如果新开卡/空库下命中 "no such table"，则按当前聊天模板建表并重试一次。
+   * 这样 <if db>/<if sql>、世界书条件和剧情条件模板可以在首次填表前安全求值，
+   * 同时仍然只在确实查询到缺失表时才锁定当前聊天模板结构。
    */
   executeQuery(sql: string, params?: (string | number | null)[]): SqlQueryResult {
     this._ensureInitialized();
-    const result = this.engine.query(sql, params);
+    this._ensureTablesForQuery(sql);
+    let result;
+    try {
+      result = this.engine.query(sql, params);
+    } catch (e: any) {
+      if (!isNoSuchTableError_ACU(e)) throw e;
+      logWarn_ACU(`[SqlTableService] 查询命中缺失表，按当前模板建表后重试: ${e?.message || String(e)}`);
+      this._ensureTablesFromTemplate();
+      result = this.engine.query(sql, params);
+    }
     return {
       columns: result.columns,
       values: result.values,
       rowCount: result.values.length,
     };
+  }
+
+  /**
+   * 查询条件模板/世界书条件在新开卡时经常先于首次写表执行。
+   * 先从 SELECT 中预扫 FROM/JOIN 表名；如果命中当前库里还没有的表，
+   * 直接按当前聊天模板建表，避免 SqliteEngine 先打出一条 no such table 错误日志。
+   * catch 分支仍保留，兜底处理复杂 SQL/正则未覆盖的表名提取场景。
+   */
+  private _ensureTablesForQuery(sql: string): void {
+    const referencedTables = extractTableNamesFromQuery_ACU(sql);
+    if (referencedTables.length === 0) return;
+
+    const existingTables = new Set(this.engine.getTableNames());
+    const missingReferencedTables = referencedTables.filter(name => !existingTables.has(name));
+    if (missingReferencedTables.length === 0) return;
+
+    logDebug_ACU(`[SqlTableService] 查询预扫发现缺失表，按当前模板建表后再执行: ${missingReferencedTables.join(', ')}`);
+    this._ensureTablesFromTemplate();
   }
 
   /**
@@ -710,4 +737,32 @@ export function extractTableNamesFromStatements(statements: string[]): string[] 
   }
 
   return Array.from(tableNames);
+}
+
+function isNoSuchTableError_ACU(error: any): boolean {
+  const message = String(error?.message || error || '');
+  return /no such table/i.test(message);
+}
+
+function extractTableNamesFromQuery_ACU(sql: string): string[] {
+  if (typeof sql !== 'string' || !sql.trim()) return [];
+
+  const withoutStrings = sql
+    .replace(/'([^']|'')*'/g, "''")
+    .replace(/"([^"]|"")*"/g, '""');
+
+  const tableNames = new Set<string>();
+  const tableRefPattern = /\b(?:FROM|JOIN)\s+(?!\()(?:(?:main|temp)\.)?[`"\[]?([A-Za-z_][A-Za-z0-9_]*)[`"\]]?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = tableRefPattern.exec(withoutStrings)) !== null) {
+    const tableName = match[1];
+    if (!tableName || isBuiltinSqliteTable_ACU(tableName)) continue;
+    tableNames.add(tableName);
+  }
+
+  return Array.from(tableNames);
+}
+
+function isBuiltinSqliteTable_ACU(tableName: string): boolean {
+  return /^(sqlite_master|sqlite_schema|sqlite_sequence)$/i.test(tableName);
 }
