@@ -595,8 +595,12 @@ export   async function refreshMergedDataAndNotify_ACU() {
         Object.keys(mergedData).forEach((sheetKey: string) => {
             if (mergedData[sheetKey] && mergedData[sheetKey].content && Array.isArray(mergedData[sheetKey].content)) {
                 const table = mergedData[sheetKey];
+                const headerRow = Array.isArray(table.content[0]) ? table.content[0] : [];
+                const summaryIndexCol = headerRow.findIndex((h: any) => String(h ?? '').trim() === '编码索引');
+                const amCodeCol = summaryIndexCol >= 0 ? summaryIndexCol : 1;
                 table.content.slice(1).forEach((row: any, idx: number) => {
-                    if (row && row.length > 1 && row[1] && row[1].startsWith('AM') && row[row.length - 1] !== 'auto_merged') {
+                    const amCode = String(row?.[amCodeCol] ?? '');
+                    if (row && row.length > amCodeCol && amCode.startsWith('AM') && row[row.length - 1] !== 'auto_merged') {
                         // 发现AM开头的条目缺少auto_merged标记，自动修复
                         row.push('auto_merged');
                         integrityFixed = true;

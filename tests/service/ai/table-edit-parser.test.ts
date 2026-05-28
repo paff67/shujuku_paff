@@ -62,6 +62,7 @@ import {
   extractTableEditInner_ACU,
   parseAndApplyTableEdits_ACU,
   isSqlContent,
+  extractSqlPayload_ACU,
 } from '../../../src/service/ai/prompt-builder/table-edit-parser';
 
 // ═══════════════════════════════════════════════════════════════
@@ -142,6 +143,23 @@ describe('isSqlContent', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+describe('extractSqlPayload_ACU', () => {
+  it('extracts SQL after explanatory prose', () => {
+    const content = "Use SQL in tableEdit.\nUPDATE inventory SET quantity=5 WHERE row_id=1;";
+    expect(extractSqlPayload_ACU(content)).toBe('UPDATE inventory SET quantity=5 WHERE row_id=1;');
+  });
+
+  it('does not treat prose-only SQL keyword list as executable SQL', () => {
+    const content = 'Format note: INSERT INTO / UPDATE / DELETE FROM are supported.';
+    expect(extractSqlPayload_ACU(content)).toBeNull();
+  });
+
+  it('trims a dangling quote after the final semicolon', () => {
+    const content = "prose\nINSERT INTO inventory VALUES (1,'sword',3);\"";
+    expect(extractSqlPayload_ACU(content)).toBe("INSERT INTO inventory VALUES (1,'sword',3);");
+  });
+});
+
 // extractTableEditInner_ACU
 // ═══════════════════════════════════════════════════════════════
 describe('extractTableEditInner_ACU', () => {
@@ -279,8 +297,8 @@ describe('parseAndApplyTableEdits_ACU — SQL 分支', () => {
     };
   });
 
-  it('SQLite 模式下 SQL 内容走 SQL 执行路径', () => {
-    const aiResponse = "<tableEdit>INSERT INTO inventory VALUES (2, '药水', 5);</tableEdit>";
+  it('SQLite mode routes SQL content to provider.applyEdits', () => {
+    const aiResponse = "<tableEdit>INSERT INTO inventory VALUES (2, 'potion', 5);</tableEdit>";
     mockApplyEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 });
 
     const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
@@ -288,15 +306,20 @@ describe('parseAndApplyTableEdits_ACU — SQL 分支', () => {
     expect(result).toEqual({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 });
   });
 
-  it('SQLite 模式下非 SQL 内容走原生解析路径', () => {
-    const aiResponse = "<tableEdit>insertRow(0, {0: '药水', 1: '5'})</tableEdit>";
+  it('SQLite mode extracts SQL after prose and routes to provider.applyEdits', () => {
+    const aiResponse = "<tableEdit>Before SQL.\nUPDATE inventory SET quantity=5 WHERE row_id=1;</tableEdit>";
+    mockApplyEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 });
+
+    parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(mockApplyEdits).toHaveBeenCalledWith('UPDATE inventory SET quantity=5 WHERE row_id=1;', 'standard');
+  });
+
+  it('SQLite mode rejects DSL content instead of falling back to native parser', () => {
+    const aiResponse = "<tableEdit>insertRow(0, {0: 'potion', 1: '5'})</tableEdit>";
     mockApplyEdits.mockClear();
 
-    const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
-    // 非 SQL 内容不应调用 provider.applyEdits
+    expect(() => parseAndApplyTableEdits_ACU(aiResponse, 'standard')).toThrow('[SQL Mode]');
     expect(mockApplyEdits).not.toHaveBeenCalled();
-    // 应该走原生解析路径
-    expect(result).toHaveProperty('success');
   });
 
   it('非 SQLite 模式下 SQL 内容走原生解析路径', () => {

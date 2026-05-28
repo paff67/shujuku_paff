@@ -633,18 +633,32 @@ describe('SqlTableService', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // 新开卡场景：executeQuery 不触发建表
+  // 新开卡场景：executeQuery 遇到 no such table 时按模板建表并重试一次
   // ═══════════════════════════════════════════════════════════════
-  describe('新开卡场景下 executeQuery 不触发建表', () => {
-    it('新开卡后 executeQuery 查询不存在的表应抛出错误，而非静默建表', async () => {
-      // 模拟新开卡：mergeAll 返回 null
+  describe('新开卡场景下 executeQuery 缺表兜底', () => {
+    it('new chat executeQuery auto-creates missing template tables without noisy no-such-table log', async () => {
       mockMergeAll.mockResolvedValue(null);
       await service.loadFromChat();
 
-      // executeQuery 不应触发建表，查询不存在的表应抛出错误
-      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
-    });
+      const { parseTableTemplateJson_ACU, logError_ACU } = await import('../../../src/shared/utils');
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory',
+          name: 'inventory',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
+          content: [['row_id', 'item_name', 'quantity']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 0,
+        },
+      } as any);
 
+      const result = service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory');
+      expect(result.values[0][0]).toBe(0);
+      expect(result.rowCount).toBe(1);
+      expect(vi.mocked(logError_ACU).mock.calls.some(call => call.map(String).join(' ').includes('no such table'))).toBe(false);
+    });
     it('新开卡后 applyEdits 才触发建表', async () => {
       // 模拟新开卡
       mockMergeAll.mockResolvedValue(null);
@@ -1164,7 +1178,8 @@ describe('SqlTableService', () => {
       expect(options.afterData).toHaveProperty('sheet_0');
       expect(options.afterData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
       expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
-      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
+      const queryResult = service.executeQuery('SELECT * FROM inventory');
+      expect(queryResult.rowCount).toBe(0);
     });
 
     it('replaceCurrentData 收到空壳批次后保存时应把清空防线参数传给持久化层', async () => {
