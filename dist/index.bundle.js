@@ -33269,8 +33269,6 @@ $CONTENT
                         groupKey: item.groupKey,
                         groupOrder: item.groupOrder,
                         prepareAiCallOnly: true,
-                        deferApply: true,
-                        deferPersistence: true,
                     });
                     if (!prepareResult.success) {
                         failedGroups.push({
