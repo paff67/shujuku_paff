@@ -38,7 +38,7 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
 }
 import { checkIfFirstTimeInit_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { parseAndApplyTableEdits_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
-import { extractTableEditInner_ACU } from '../ai/prompt-builder/table-edit-parser';
+import { coerceSqliteTableEditPayload_ACU, extractTableEditInner_ACU } from '../ai/prompt-builder/table-edit-parser';
 
 // ═══ Task 1: 提取和合并 AI 响应编辑内容 ═══
 
@@ -214,7 +214,11 @@ export async function applyMergedEdits_ACU(
             }
 
             // 2. 执行编辑
-            const result = provider.applyEdits(mergedEditContent, updateMode);
+            const sqlPayload = coerceSqliteTableEditPayload_ACU(mergedEditContent);
+            if (!sqlPayload) {
+                throw new Error('[SQL Mode] 合并编辑内容未检测到可执行 SQL，且无法从 legacy insertRow/updateRow/deleteRow 兜底转换。');
+            }
+            const result = provider.applyEdits(sqlPayload, updateMode);
             if (!result.success) {
                 return {
                     success: false,

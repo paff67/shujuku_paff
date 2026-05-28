@@ -8180,16 +8180,16 @@ $CONTENT
             logDebug_ACU('Empty <tableEdit> block. No edits to apply.');
             return true;
         }
-        // SQLite 模式强制 SQL-only：
-        // 1) 允许 AI 在 <tableEdit> 内混入少量说明文字时，从第一条真正的 SQL 语句开始截取执行；
-        // 2) 不再静默回落到 insertRow/updateRow/deleteRow DSL，避免 SQLite 表结构下出现列错位和 row_id 重复。
+        // SQLite 模式强制走 provider.applyEdits：
+        // 1) 允许 AI 在 <tableEdit> 内混入说明文字时，从第一条真正的 SQL 语句开始截取执行；
+        // 2) 如果模型仍输出旧 DSL（insertRow/updateRow/deleteRow），兜底转换为 SQL，避免把解释文本或 DSL 当 SQL 直接执行。
         if (isSqliteMode()) {
-            const sqlPayload = extractSqlPayload_ACU(editsString);
+            const sqlPayload = coerceSqliteTableEditPayload_ACU(editsString);
             if (!sqlPayload) {
                 const hasDslCommands = /\b(insertRow|updateRow|deleteRow)\s*\(/i.test(editsString);
                 const message = hasDslCommands
-                    ? '[SQL Mode] SQLite 模式下 <tableEdit> 只能使用 SQL 语句（INSERT/UPDATE/DELETE），不能使用 insertRow/updateRow/deleteRow。'
-                    : '[SQL Mode] SQLite 模式下 <tableEdit> 未检测到可执行 SQL 语句。';
+                    ? '[SQL Mode] SQLite 模式检测到 insertRow/updateRow/deleteRow，但无法转换为 SQL；请输出 INSERT/UPDATE/DELETE SQL。'
+                    : '[SQL Mode] SQLite 模式下 <tableEdit> 未检测到可执行 SQL。';
                 logError_ACU(message);
                 throw new Error(message);
             }
@@ -8714,6 +8714,369 @@ $CONTENT
         payload = payload.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
         payload = payload.replace(/;\s*["'`]\s*$/g, ';').trim();
         return isSqlContent(payload) && looksExecutableSqlPayload_ACU(payload) ? payload : null;
+    }
+    function coerceSqliteTableEditPayload_ACU(content) {
+        if (typeof content !== 'string')
+            return null;
+        const extracted = extractTableEditInner_ACU(content, { allowNoTableEditTags: false, useLastPairOnly: true });
+        const candidate = (extracted?.inner || content).replace(/<!--|-->/g, '').trim();
+        if (!candidate)
+            return null;
+        const directSql = extractSqlPayload_ACU(candidate);
+        if (directSql)
+            return directSql;
+        const convertedSql = convertLegacyDslEditsToSql_ACU(candidate);
+        if (convertedSql) {
+            logWarn_ACU('[SQL Mode] 检测到 legacy insertRow/updateRow/deleteRow，已兜底转换为 SQL 执行。');
+            return convertedSql;
+        }
+        return null;
+    }
+    function convertLegacyDslEditsToSql_ACU(content) {
+        if (typeof content !== 'string' || !/\b(insertRow|updateRow|deleteRow)\s*\(/i.test(content))
+            return null;
+        if (!currentJsonTableData_ACU)
+            return null;
+        const commands = extractLegacyDslCommandLines_ACU(content);
+        if (commands.length === 0)
+            return null;
+        const tableLookup = buildSqliteDslTableLookup_ACU();
+        const statements = [];
+        commands.forEach(commandLine => {
+            const parsed = parseLegacyDslCommand_ACU(commandLine);
+            if (!parsed)
+                return;
+            const converted = legacyDslCommandToSql_ACU(parsed, tableLookup);
+            if (converted)
+                statements.push(converted);
+        });
+        return statements.length > 0 ? statements.join('\n') : null;
+    }
+    function buildSqliteDslTableLookup_ACU() {
+        const lookup = new Map();
+        if (!currentJsonTableData_ACU)
+            return lookup;
+        const sheetKeys = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
+        sheetKeys.forEach((sheetKey, index) => {
+            const table = currentJsonTableData_ACU[sheetKey];
+            if (!table)
+                return;
+            const ddl = table?.sourceData?.ddl || '';
+            const tableName = parseDDLTableName(ddl) || String(table.name || sheetKey).trim();
+            if (!tableName)
+                return;
+            const ddlColumns = parseDDLColumnNames(ddl);
+            const headerColumns = Array.isArray(table.content?.[0])
+                ? table.content[0].map((item) => String(item ?? '').trim()).filter(Boolean)
+                : [];
+            const columns = ddlColumns.length > 0 ? ddlColumns : headerColumns;
+            const businessColumns = columns.filter((col, idx) => idx !== 0 && col.toLowerCase() !== 'row_id');
+            const info = { sheetKey, table, tableName, columns, businessColumns };
+            const aliases = [
+                String(index),
+                sheetKey,
+                tableName,
+                String(table.name || '').trim(),
+            ].filter(Boolean);
+            aliases.forEach(alias => {
+                lookup.set(alias, info);
+                lookup.set(alias.toLowerCase(), info);
+            });
+        });
+        return lookup;
+    }
+    function extractLegacyDslCommandLines_ACU(content) {
+        const commands = [];
+        const commandRe = /\b(?:insertRow|updateRow|deleteRow)\s*\(/ig;
+        let match;
+        while ((match = commandRe.exec(content)) !== null) {
+            const start = match.index;
+            const openIdx = content.indexOf('(', start);
+            if (openIdx < 0)
+                continue;
+            let depth = 0;
+            let quote = null;
+            let escape = false;
+            let end = -1;
+            for (let i = openIdx; i < content.length; i++) {
+                const ch = content[i];
+                if (quote) {
+                    if (escape) {
+                        escape = false;
+                    }
+                    else if (ch === '\\') {
+                        escape = true;
+                    }
+                    else if (ch === quote) {
+                        quote = null;
+                    }
+                    continue;
+                }
+                if (ch === '"' || ch === "'" || ch === '`') {
+                    quote = ch;
+                    continue;
+                }
+                if (ch === '(') {
+                    depth++;
+                    continue;
+                }
+                if (ch === ')') {
+                    depth--;
+                    if (depth === 0) {
+                        end = i + 1;
+                        break;
+                    }
+                }
+            }
+            if (end > start) {
+                let command = content.slice(start, end).trim();
+                if (content[end] === ';') {
+                    command += ';';
+                    commandRe.lastIndex = end + 1;
+                }
+                else {
+                    commandRe.lastIndex = end;
+                }
+                commands.push(command);
+            }
+        }
+        return commands;
+    }
+    function parseLegacyDslCommand_ACU(rawLine) {
+        try {
+            const match = rawLine.trim().match(/^(insertRow|updateRow|deleteRow)\s*\(([\s\S]*)\)\s*;?$/i);
+            if (!match)
+                return null;
+            const command = match[1];
+            const argsString = match[2].trim();
+            const firstBrace = argsString.indexOf('{');
+            if (firstBrace === -1) {
+                return { command, args: splitLegacyDslArgs_ACU(argsString).map(parseLegacyDslPrimitive_ACU), line: rawLine };
+            }
+            const jsonEnd = findMatchingBrace_ACU(argsString, firstBrace);
+            if (jsonEnd < firstBrace)
+                return null;
+            const paramsPart = argsString.slice(0, firstBrace).replace(/,\s*$/, '').trim();
+            const jsonPart = argsString.slice(firstBrace, jsonEnd + 1);
+            const params = paramsPart ? splitLegacyDslArgs_ACU(paramsPart).map(parseLegacyDslPrimitive_ACU) : [];
+            let rowData;
+            try {
+                rowData = JSON.parse(jsonPart);
+            }
+            catch (_jsonError) {
+                const loose = coerceLooseRowObject_ACU(jsonPart);
+                if (loose.success) {
+                    rowData = loose.result;
+                }
+                else {
+                    const sanitized = sanitizeJsonPipeline_ACU(jsonPart);
+                    if (!sanitized.success)
+                        return null;
+                    try {
+                        rowData = JSON.parse(sanitized.result);
+                    }
+                    catch (_sanitizedError) {
+                        const looseSanitized = coerceLooseRowObject_ACU(sanitized.result);
+                        if (!looseSanitized.success)
+                            return null;
+                        rowData = looseSanitized.result;
+                    }
+                }
+            }
+            return { command, args: [...params, rowData], line: rawLine };
+        }
+        catch (e) {
+            logWarn_ACU(`[SQL Mode] legacy DSL 解析失败: ${String(e?.message || e)}`);
+            return null;
+        }
+    }
+    function splitLegacyDslArgs_ACU(input) {
+        const out = [];
+        let current = '';
+        let quote = null;
+        let escape = false;
+        let depth = 0;
+        for (let i = 0; i < input.length; i++) {
+            const ch = input[i];
+            if (quote) {
+                current += ch;
+                if (escape) {
+                    escape = false;
+                }
+                else if (ch === '\\') {
+                    escape = true;
+                }
+                else if (ch === quote) {
+                    quote = null;
+                }
+                continue;
+            }
+            if (ch === '"' || ch === "'" || ch === '`') {
+                quote = ch;
+                current += ch;
+                continue;
+            }
+            if (ch === '(' || ch === '[' || ch === '{')
+                depth++;
+            if (ch === ')' || ch === ']' || ch === '}')
+                depth = Math.max(0, depth - 1);
+            if (ch === ',' && depth === 0) {
+                out.push(current.trim());
+                current = '';
+                continue;
+            }
+            current += ch;
+        }
+        if (current.trim())
+            out.push(current.trim());
+        return out;
+    }
+    function parseLegacyDslPrimitive_ACU(raw) {
+        const trimmed = String(raw ?? '').trim();
+        if (!trimmed)
+            return '';
+        try {
+            return JSON.parse(trimmed);
+        }
+        catch (_e) {
+            if (/^-?\d+(?:\.\d+)?$/.test(trimmed))
+                return Number(trimmed);
+            if (/^null$/i.test(trimmed))
+                return null;
+            if (/^true$/i.test(trimmed))
+                return true;
+            if (/^false$/i.test(trimmed))
+                return false;
+            return trimmed.replace(/^["'`]|["'`]$/g, '');
+        }
+    }
+    function findMatchingBrace_ACU(input, openIdx) {
+        let depth = 0;
+        let quote = null;
+        let escape = false;
+        for (let i = openIdx; i < input.length; i++) {
+            const ch = input[i];
+            if (quote) {
+                if (escape) {
+                    escape = false;
+                }
+                else if (ch === '\\') {
+                    escape = true;
+                }
+                else if (ch === quote) {
+                    quote = null;
+                }
+                continue;
+            }
+            if (ch === '"' || ch === "'" || ch === '`') {
+                quote = ch;
+                continue;
+            }
+            if (ch === '{')
+                depth++;
+            if (ch === '}') {
+                depth--;
+                if (depth === 0)
+                    return i;
+            }
+        }
+        return -1;
+    }
+    function legacyDslCommandToSql_ACU(parsed, lookup) {
+        const command = String(parsed.command || '').toLowerCase();
+        const tableInfo = resolveLegacyDslTable_ACU(parsed.args[0], lookup);
+        if (!tableInfo)
+            return null;
+        if (command === 'insertrow') {
+            const data = parsed.args[1];
+            if (!data || typeof data !== 'object' || Array.isArray(data))
+                return null;
+            const pairs = buildSqlColumnValuePairsFromLegacyData_ACU(data, tableInfo);
+            if (pairs.length === 0)
+                return null;
+            const cols = pairs.map(pair => quoteSqlIdentifier_ACU(pair.column)).join(', ');
+            const vals = pairs.map(pair => sqlLiteral_ACU(pair.value)).join(', ');
+            return `INSERT INTO ${quoteSqlIdentifier_ACU(tableInfo.tableName)} (${cols}) VALUES (${vals});`;
+        }
+        if (command === 'updaterow') {
+            const rowIndex = Number(parsed.args[1]);
+            const data = parsed.args[2];
+            if (!Number.isFinite(rowIndex) || !data || typeof data !== 'object' || Array.isArray(data))
+                return null;
+            const pairs = buildSqlColumnValuePairsFromLegacyData_ACU(data, tableInfo);
+            if (pairs.length === 0)
+                return null;
+            const setClause = pairs.map(pair => `${quoteSqlIdentifier_ACU(pair.column)} = ${sqlLiteral_ACU(pair.value)}`).join(', ');
+            return `UPDATE ${quoteSqlIdentifier_ACU(tableInfo.tableName)} SET ${setClause} WHERE row_id = ${sqlLiteral_ACU(resolveRowIdForLegacyIndex_ACU(tableInfo, rowIndex))};`;
+        }
+        if (command === 'deleterow') {
+            const rowIndex = Number(parsed.args[1]);
+            if (!Number.isFinite(rowIndex))
+                return null;
+            return `DELETE FROM ${quoteSqlIdentifier_ACU(tableInfo.tableName)} WHERE row_id = ${sqlLiteral_ACU(resolveRowIdForLegacyIndex_ACU(tableInfo, rowIndex))};`;
+        }
+        return null;
+    }
+    function resolveLegacyDslTable_ACU(identifier, lookup) {
+        const raw = String(identifier ?? '').trim().replace(/^["'`]|["'`]$/g, '');
+        const lowered = raw.toLowerCase();
+        if (!raw || lowered === 'tableid' || lowered === 'tableindex' || lowered === 'tablename' || raw.includes('\u8868\u683c') || raw.includes('\u8868\u540d'))
+            return null;
+        return lookup.get(raw) || lookup.get(raw.toLowerCase()) || null;
+    }
+    function buildSqlColumnValuePairsFromLegacyData_ACU(data, tableInfo) {
+        const businessColumns = tableInfo.businessColumns;
+        const numericKeys = Object.keys(data).filter(k => /^\d+$/.test(k)).map(Number).sort((a, b) => a - b);
+        let numericOffset = 0;
+        if (numericKeys.length > businessColumns.length && numericKeys[0] === 0) {
+            const val0 = String(data[0] ?? data['0'] ?? '');
+            if (/^\d+$/.test(val0))
+                numericOffset = 1;
+        }
+        const pairs = [];
+        const seen = new Set();
+        Object.keys(data).forEach(rawKey => {
+            let column = null;
+            if (/^\d+$/.test(rawKey)) {
+                const idx = Number(rawKey) - numericOffset;
+                if (idx < 0)
+                    return;
+                column = businessColumns[idx] || null;
+            }
+            else {
+                const normalizedKey = rawKey.trim();
+                if (normalizedKey.toLowerCase() === 'row_id')
+                    return;
+                column = tableInfo.columns.find(col => col === normalizedKey)
+                    || tableInfo.businessColumns.find(col => col === normalizedKey)
+                    || null;
+            }
+            if (!column || column.toLowerCase() === 'row_id' || seen.has(column))
+                return;
+            seen.add(column);
+            pairs.push({ column, value: data[rawKey] });
+        });
+        return pairs;
+    }
+    function resolveRowIdForLegacyIndex_ACU(tableInfo, rowIndex) {
+        const table = tableInfo.table;
+        const row = Array.isArray(table?.content) ? table.content[Math.trunc(rowIndex) + 1] : null;
+        if (Array.isArray(row) && row.length > 0 && row[0] !== undefined && row[0] !== null && String(row[0]).trim() !== '') {
+            return row[0];
+        }
+        return Math.trunc(rowIndex) + 1;
+    }
+    function quoteSqlIdentifier_ACU(identifier) {
+        return `"${String(identifier).replace(/"/g, '""')}"`;
+    }
+    function sqlLiteral_ACU(value) {
+        if (value === null || value === undefined)
+            return 'NULL';
+        if (typeof value === 'number' && Number.isFinite(value))
+            return String(value);
+        if (typeof value === 'boolean')
+            return value ? '1' : '0';
+        return `'${String(value).replace(/'/g, "''")}'`;
     }
     function looksExecutableSqlPayload_ACU(payload) {
         const trimmed = payload.trim();
@@ -32415,7 +32778,11 @@ $CONTENT
                     logWarn_ACU('[applyMergedEdits] 建表失败，继续执行编辑:', e?.message);
                 }
                 // 2. 执行编辑
-                const result = provider.applyEdits(mergedEditContent, updateMode);
+                const sqlPayload = coerceSqliteTableEditPayload_ACU(mergedEditContent);
+                if (!sqlPayload) {
+                    throw new Error('[SQL Mode] 合并编辑内容未检测到可执行 SQL，且无法从 legacy insertRow/updateRow/deleteRow 兜底转换。');
+                }
+                const result = provider.applyEdits(sqlPayload, updateMode);
                 if (!result.success) {
                     return {
                         success: false,

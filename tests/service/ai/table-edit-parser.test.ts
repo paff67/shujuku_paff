@@ -63,6 +63,8 @@ import {
   parseAndApplyTableEdits_ACU,
   isSqlContent,
   extractSqlPayload_ACU,
+  coerceSqliteTableEditPayload_ACU,
+  convertLegacyDslEditsToSql_ACU,
 } from '../../../src/service/ai/prompt-builder/table-edit-parser';
 
 // ═══════════════════════════════════════════════════════════════
@@ -143,6 +145,45 @@ describe('isSqlContent', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+describe('SQLite legacy DSL to SQL fallback', () => {
+  beforeEach(() => {
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        name: '背包物品表',
+        content: [['row_id', 'item_name', 'quantity'], ['7', '铁剑', '3']],
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);' },
+        updateConfig: {},
+      },
+      sheet_1: {
+        name: '编年史',
+        content: [['row_id', 'code_index', 'time_span', 'today_relation', 'summary'], ['1', 'AM0001', 't0', '既有关系', '旧摘要']],
+        sourceData: { ddl: 'CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY, code_index TEXT, time_span TEXT, today_relation TEXT, summary TEXT);' },
+        updateConfig: {},
+      },
+    };
+  });
+
+  it('converts insertRow with SQL table name to INSERT and preserves skipped numeric columns', () => {
+    const sql = convertLegacyDslEditsToSql_ACU('解释文本 <tableEdit>insertRow("chronicle", {"0":"AM0002","1":"t1","3":"新摘要"})</tableEdit>');
+    expect(sql).toBe(`INSERT INTO "chronicle" ("code_index", "time_span", "summary") VALUES ('AM0002', 't1', '新摘要');`);
+  });
+
+  it('deduplicates accidental row_id in insertRow data before converting', () => {
+    const sql = convertLegacyDslEditsToSql_ACU('insertRow(0, {"0":"8","1":"药水","2":2})');
+    expect(sql).toBe(`INSERT INTO "inventory" ("item_name", "quantity") VALUES ('药水', 2);`);
+  });
+
+  it('converts updateRow/deleteRow with native row index to row_id predicates', () => {
+    const sql = convertLegacyDslEditsToSql_ACU('updateRow(0, 0, {"1":4}); deleteRow(0, 0);');
+    expect(sql).toBe(`UPDATE "inventory" SET "quantity" = 4 WHERE row_id = '7';\nDELETE FROM "inventory" WHERE row_id = '7';`);
+  });
+
+  it('coerces the last tableEdit block and ignores prose before it', () => {
+    const sql = coerceSqliteTableEditPayload_ACU('前置解释 insertRow(表格ID, {"0":"无效"}) <content><tableEdit>insertRow("inventory", {"0":"药水","1":1})</tableEdit></content>');
+    expect(sql).toBe(`INSERT INTO "inventory" ("item_name", "quantity") VALUES ('药水', 1);`);
+  });
+});
+
 describe('extractSqlPayload_ACU', () => {
   it('extracts SQL after explanatory prose', () => {
     const content = "Use SQL in tableEdit.\nUPDATE inventory SET quantity=5 WHERE row_id=1;";
@@ -292,6 +333,7 @@ describe('parseAndApplyTableEdits_ACU — SQL 分支', () => {
       sheet_0: {
         name: '背包物品表',
         content: [['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']],
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);' },
         updateConfig: {},
       },
     };
@@ -314,12 +356,13 @@ describe('parseAndApplyTableEdits_ACU — SQL 分支', () => {
     expect(mockApplyEdits).toHaveBeenCalledWith('UPDATE inventory SET quantity=5 WHERE row_id=1;', 'standard');
   });
 
-  it('SQLite mode rejects DSL content instead of falling back to native parser', () => {
-    const aiResponse = "<tableEdit>insertRow(0, {0: 'potion', 1: '5'})</tableEdit>";
+  it('SQLite mode converts legacy DSL content to SQL instead of falling back to native parser', () => {
+    const aiResponse = '<tableEdit>insertRow(0, {"0":"potion","1":5})</tableEdit>';
     mockApplyEdits.mockClear();
+    mockApplyEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 });
 
-    expect(() => parseAndApplyTableEdits_ACU(aiResponse, 'standard')).toThrow('[SQL Mode]');
-    expect(mockApplyEdits).not.toHaveBeenCalled();
+    parseAndApplyTableEdits_ACU(aiResponse, 'standard');
+    expect(mockApplyEdits).toHaveBeenCalledWith(`INSERT INTO "inventory" ("item_name", "quantity") VALUES ('potion', 5);`, 'standard');
   });
 
   it('非 SQLite 模式下 SQL 内容走原生解析路径', () => {
