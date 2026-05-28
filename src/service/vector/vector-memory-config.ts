@@ -24,6 +24,7 @@ export interface VectorMemoryConfig_ACU {
     rerankEndpoint: string;
     rerankApiKey: string;
     rerankModel: string;
+    rerankInstruction: string;
     vectorNamespace: string;
     entryComment: string;
     entryKey: string;
@@ -130,6 +131,7 @@ export function normalizeVectorMemoryConfig_ACU(rawConfig: any): VectorMemoryCon
         rerankEndpoint: normalizeTextField_ACU((source as any).rerankEndpoint, (defaults as any).rerankEndpoint),
         rerankApiKey: normalizeTextField_ACU((source as any).rerankApiKey, (defaults as any).rerankApiKey),
         rerankModel: normalizeTextField_ACU((source as any).rerankModel, (defaults as any).rerankModel),
+        rerankInstruction: typeof (source as any).rerankInstruction === 'string' ? (source as any).rerankInstruction.trim() : (defaults as any).rerankInstruction,
         vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
         entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
         entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,

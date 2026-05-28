@@ -13,6 +13,7 @@ export interface VectorApiForm {
   rerankEndpoint: string;
   rerankModel: string;
   rerankApiKey: string;
+  rerankInstruction: string;
 }
 
 function createEmptyForm(): VectorApiForm {
@@ -23,6 +24,7 @@ function createEmptyForm(): VectorApiForm {
     rerankEndpoint: "",
     rerankModel: "",
     rerankApiKey: "",
+    rerankInstruction: "",
   };
 }
 
@@ -40,6 +42,7 @@ export function useVectorApiConfig() {
     form.rerankEndpoint = config.rerankEndpoint || "";
     form.rerankModel = config.rerankModel || "";
     form.rerankApiKey = config.rerankApiKey || "";
+    form.rerankInstruction = config.rerankInstruction ?? "";
     errors.value = [];
   }
 
@@ -51,6 +54,7 @@ export function useVectorApiConfig() {
     config.rerankEndpoint = form.rerankEndpoint.trim();
     config.rerankModel = form.rerankModel.trim();
     config.rerankApiKey = form.rerankApiKey;
+    config.rerankInstruction = form.rerankInstruction.trim();
 
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {

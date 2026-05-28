@@ -1,4 +1,4 @@
-STscript语言参考
+STscript语言参考1
 #什么是 STscript？
 它是一种简单而强大的脚本语言，可以在不需要复杂编码的情况下扩展 SillyTavern 的功能，让您能够：
 

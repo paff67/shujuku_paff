@@ -169,6 +169,17 @@
                   autocomplete="off"
                 />
               </AcuFormRow>
+              <AcuFormRow
+                label="重排指令"
+                hint="默认启用；清空后不向 Rerank 服务发送 instruction，可用于兼容不支持该字段的服务。"
+              >
+                <textarea
+                  v-model="vectorApiConfig.form.rerankInstruction"
+                  class="acu-v2-vector-api-form__instruction-textarea"
+                  rows="3"
+                  placeholder="留空则不发送 instruction"
+                ></textarea>
+              </AcuFormRow>
             </fieldset>
 
             <AcuMessage v-if="vectorApiConfig.errors.value.length" kind="error">
@@ -571,5 +582,18 @@ useUiCloseGuard(confirmPromptClose);
   .acu-v2-vector-index-page {
     padding: 14px;
   }
+}
+
+.acu-v2-vector-api-form__instruction-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);
+  border-radius: 4px;
+  background: var(--acu-bg-2, transparent);
+  color: var(--acu-text-1);
+  font-size: var(--acu-font-size-body, 12px);
+  line-height: 1.5;
+  resize: vertical;
 }
 </style>

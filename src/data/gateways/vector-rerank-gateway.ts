@@ -8,6 +8,7 @@ export interface VectorRerankResult_ACU {
 export interface VectorRerankRequest_ACU {
     endpoint: string;
     apiKey?: string;
+    instruction?: string;
     model: string;
     query: string;
     documents: string[];
@@ -86,11 +87,16 @@ export async function createRerankScores_ACU(request: VectorRerankRequest_ACU): 
     const response = await fetch(endpoint, {
         method: 'POST',
         headers: buildRerankHeaders_ACU(request.apiKey),
-        body: JSON.stringify({
-            model,
-            query,
-            documents,
-        }),
+        body: JSON.stringify((() => {
+            const payload: Record<string, any> = {
+                model,
+                query,
+                documents,
+            };
+            const instruction = String(request.instruction ?? '').trim();
+            if (instruction) payload.instruction = instruction;
+            return payload;
+        })()),
     });
 
     if (!response.ok) {

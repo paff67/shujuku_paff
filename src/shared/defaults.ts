@@ -44,6 +44,7 @@ export const defaultVectorMemoryConfig_ACU = {
   rerankEndpoint: '',
   rerankApiKey: '',
   rerankModel: '',
+  rerankInstruction: '请根据当前用户输入及关键词，判断每个候选纪要条目的相关性，并将最相关的条目按相关性从高到低降序排列。优先选择能够直接回答、延续或补全当前用户输入意图的条目。',
   vectorNamespace: 'chat',
   entryComment: 'TavernDB-ACU-VectorMemory',
   entryKey: 'TavernDB-ACU-VectorMemory-Key',
