@@ -81024,9 +81024,12 @@ Expected function or array of functions, received type ${typeof value}.`
         const prefix = event.currentBatch && event.totalBatches
             ? `批次 ${event.currentBatch}/${event.totalBatches} · `
             : '';
+        if (event.message && event.phase !== 'retry' && event.phase !== 'error') {
+            return `${prefix}${normalizeManualProgressMessage(event.message)}`;
+        }
         switch (event.phase) {
             case 'preparing': return `${prefix}准备上下文`;
-            case 'calling_ai': return `${prefix}调用 AI${event.attempt ? ` (${event.attempt}/${event.maxRetries || '?'})` : ''}`;
+            case 'calling_ai': return `${prefix}调用 AI${event.attempt ? `（第 ${event.attempt}/${event.maxRetries || '?'} 次尝试）` : ''}`;
             case 'parsing': return `${prefix}解析填表结果`;
             case 'saving': return `${prefix}保存表格数据`;
             case 'retry': return `${prefix}重试中${event.message ? `:${event.message}` : ''}`;
@@ -81035,6 +81038,11 @@ Expected function or array of functions, received type ${typeof value}.`
             case 'error': return `${prefix}出错${event.message ? `:${event.message}` : ''}`;
             default: return prefix || '处理中';
         }
+    }
+    function normalizeManualProgressMessage(message) {
+        return message
+            .split(' AI 响应').join('手动填表结果')
+            .split('AI 响应').join('手动填表结果');
     }
     function useManualUpdate() {
         const toast = useToastStore();
@@ -81123,9 +81131,10 @@ Expected function or array of functions, received type ${typeof value}.`
             const extra = manualExtraHint.value.trim();
             if (extra)
                 _set_manualExtraHint_ACU$1(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
-            const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, (event) => {
+            const handleProgress = (event) => {
                 notifyProgress(progressLabel$1(event));
-            }));
+            };
+            const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext, executionOptions) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress, executionOptions || {}));
             try {
                 const clearBeforeUpdate = typeof window !== 'undefined' && typeof window.confirm === 'function'
                     ? window.confirm('手动填表前是否清空目标楼层中这些表的旧数据?SQLite 模式下建议清空。')
@@ -81133,7 +81142,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
                 let result;
                 try {
-                    result = await orchestrateManualUpdate_ACU(selectedManualTableKeys.value, runProcessBatch, async () => { await reloadStorageProvider(); }, { clearBeforeUpdate });
+                    result = await orchestrateManualUpdate_ACU(selectedManualTableKeys.value, runProcessBatch, async () => { await reloadStorageProvider(); }, { clearBeforeUpdate }, handleProgress);
                 }
                 finally {
                     restoreAutoUpdateSettings();

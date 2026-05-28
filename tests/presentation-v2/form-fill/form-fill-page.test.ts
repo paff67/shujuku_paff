@@ -53,7 +53,26 @@ async function mountFormFillPage(settings = createSettings(), activePageId = 'fo
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId } }));
   const { ref, computed } = await import('vue');
   const saveSettings = vi.fn(() => ({ saved: true, storageType: 'memory' }));
-  const orchestrate = vi.fn(async () => ({ success: true }));
+  const orchestrate = vi.fn(async (..._args: any[]) => ({ success: true }));
+  const executeCore = vi.fn(async (..._args: any[]) => ({ success: true, modifiedKeys: [] }));
+  const processUpdatesBatch = vi.fn(async (indices: number[], mode: string, options: any, executeUpdate: any) => {
+    if (options?.__skipExecuteForTest) return { success: true };
+    return executeUpdate(
+      [{ mes: 'AI回复' }],
+      indices[indices.length - 1] ?? -1,
+      mode,
+      false,
+      options?.targetSheetKeys ?? null,
+      options?.requestOptions ?? null,
+      { currentBatch: 1, totalBatches: 1 },
+      {
+        prepareAiCallOnly: options?.prepareAiCallOnly === true,
+        deferApply: options?.deferApply === true,
+        deferPersistence: options?.deferPersistence === true,
+        deferredAiResponse: options?.deferredResponses?.[0] ?? null,
+      },
+    );
+  });
   const manualExtraHintSetter = vi.fn();
   const openVisualizer = vi.fn(async () => {});
 
@@ -155,11 +174,11 @@ async function mountFormFillPage(settings = createSettings(), activePageId = 'fo
   }));
   vi.doMock('../../../src/service/table/update-orchestrator', () => ({
     orchestrateManualUpdate_ACU: orchestrate,
-    processUpdatesBatch_ACU: vi.fn(async () => ({ success: true })),
-    executeCardUpdateCore_ACU: vi.fn(async () => ({ success: true, modifiedKeys: [] })),
+    processUpdatesBatch_ACU: processUpdatesBatch,
+    executeCardUpdateCore_ACU: executeCore,
   }));
   vi.doMock('../../../src/service/ai/ai-service', () => ({
-    getConnectionManagerProfiles_ACU: () => [],
+    getConnectionManagerProfiles_ACU: (): any[] => [],
     fetchAvailableModels_ACU: vi.fn(async () => ({ success: true, models: [] })),
   }));
   vi.doMock('../../../src/service/worldbook/pipeline', () => ({
@@ -186,6 +205,8 @@ async function mountFormFillPage(settings = createSettings(), activePageId = 'fo
     settings,
     saveSettings,
     orchestrate,
+    processUpdatesBatch,
+    executeCore,
     worldbookConfig,
     manualExtraHintSetter,
     openVisualizer,
@@ -699,6 +720,76 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(orchestrate).toHaveBeenCalled();
     expect(orchestrate.mock.calls[0][0]).toEqual(['sheet_a', 'sheet_b']);
     expect(manualExtraHintSetter).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('手动填表展示 orchestrator 的具体进度文案，不把分组数显示成重试次数', async () => {
+    const { mount, orchestrate } = await mountFormFillPage();
+    let releaseOrchestrate = () => {};
+    orchestrate.mockImplementation(async (...args: any[]) => {
+      const onProgress = args[4] as ((event: any) => void) | undefined;
+      expect(onProgress).toEqual(expect.any(Function));
+      onProgress?.({
+        phase: 'calling_ai',
+        currentBatch: 1,
+        totalBatches: 1,
+        attempt: 1,
+        maxRetries: 20,
+        message: '正在生成第 1/20 组 AI 响应...',
+      });
+      await new Promise<void>(resolve => {
+        releaseOrchestrate = resolve;
+      });
+      return { success: true };
+    });
+
+    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
+      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
+    const button = Array.from(panel.querySelectorAll('button'))
+      .find(btn => btn.textContent?.includes('执行手动填表')) as HTMLButtonElement;
+    button.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    const toastText = document.querySelector('.acu-toast-viewport')?.textContent || '';
+    expect(toastText).toContain('批次 1/1 · 正在生成第 1/20 组手动填表结果...');
+    expect(toastText).not.toContain('调用 AI (1/20)');
+    expect(button.textContent || '').toContain('填表中...');
+
+    expect(orchestrate).toHaveBeenCalled();
+    releaseOrchestrate();
+    await new Promise(r => setTimeout(r, 0));
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('手动填表适配器会把 prepare/defer 执行选项转交给核心执行器', async () => {
+    const { mount, orchestrate, executeCore } = await mountFormFillPage();
+    orchestrate.mockImplementation(async (_targetKeys: string[], processBatch: any) => {
+      await processBatch([7], 'manual_independent', {
+        targetSheetKeys: ['sheet_a'],
+        batchSize: 1,
+        prepareAiCallOnly: true,
+        deferApply: true,
+        deferPersistence: true,
+      });
+      return { success: true };
+    });
+
+    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
+      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
+    const button = Array.from(panel.querySelectorAll('button'))
+      .find(btn => btn.textContent?.includes('执行手动填表')) as HTMLButtonElement;
+    button.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(executeCore).toHaveBeenCalled();
+    expect(executeCore.mock.calls[0][10]).toEqual({
+      prepareAiCallOnly: true,
+      deferApply: true,
+      deferPersistence: true,
+      deferredAiResponse: null,
+    });
 
     mount.__resetAcuV2MountForTests();
   });
