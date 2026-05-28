@@ -622,19 +622,11 @@ import { parseDDLColumnNames, parseDDLTableName } from '../../../shared/ddl-util
    */
   export function extractSqlPayload_ACU(content: string): string | null {
     if (typeof content !== 'string') return null;
-    const normalized = content.replace(/<!--|-->/g, '').trim();
+    const normalized = normalizeSqlPayloadText_ACU(content);
     if (!normalized) return null;
 
-    const sqlStartRe = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|REPLACE\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|UPDATE\s+(?:OR\s+\w+\s+)?[`"'\[]?[\w\u4e00-\u9fff][\w\u4e00-\u9fff`"'\]\[]*\s+SET\b|DELETE\s+FROM\s+[`"'\[]?[\w\u4e00-\u9fff]|ALTER\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|CREATE\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|DROP\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|BEGIN(?:\s+TRANSACTION)?\b)/i;
-    const match = sqlStartRe.exec(normalized);
-    if (!match || typeof match.index !== 'number') return null;
-
-    let payload = normalized.slice(match.index).trim();
-    payload = payload.replace(/\s*<\/(?:tableEdit|content|output)>[\s\S]*$/i, '').trim();
-    payload = payload.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-    payload = payload.replace(/;\s*["'`]\s*$/g, ';').trim();
-
-    return isSqlContent(payload) && looksExecutableSqlPayload_ACU(payload) ? payload : null;
+    const statements = extractExecutableSqlStatements_ACU(normalized);
+    return statements.length > 0 ? statements.join('\n') : null;
   }
 
   export function coerceSqliteTableEditPayload_ACU(content: string): string | null {
@@ -992,6 +984,78 @@ import { parseDDLColumnNames, parseDDLTableName } from '../../../shared/ddl-util
     if (typeof value === 'number' && Number.isFinite(value)) return String(value);
     if (typeof value === 'boolean') return value ? '1' : '0';
     return `'${String(value).replace(/'/g, "''")}'`;
+  }
+
+  const SQL_START_RE_ACU = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|REPLACE\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|UPDATE\s+(?:OR\s+\w+\s+)?[`"'\[]?[\w\u4e00-\u9fff][\w\u4e00-\u9fff`"'\]\[]*\s+SET\b|DELETE\s+FROM\s+[`"'\[]?[\w\u4e00-\u9fff]|ALTER\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|CREATE\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|DROP\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|BEGIN(?:\s+TRANSACTION)?\b)/i;
+
+  function normalizeSqlPayloadText_ACU(content: string): string {
+    return content
+      .replace(/<thinking[^>]*>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<thought[^>]*>[\s\S]*?<\/thought>/gi, '')
+      .replace(/<\/?(?:thinking|thought)[^>]*>/gi, '')
+      .replace(/<!--|-->/g, '')
+      .replace(/```(?:sql)?/gi, '\n')
+      .replace(/```/g, '\n')
+      .replace(/<\/?(?:tableEdit|content|output)[^>]*>/gi, '\n')
+      .trim();
+  }
+
+  function extractExecutableSqlStatements_ACU(content: string): string[] {
+    const statements: string[] = [];
+    const startRe = new RegExp(SQL_START_RE_ACU.source, 'ig');
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = startRe.exec(content)) !== null) {
+      if (match.index < cursor) continue;
+
+      const end = findSqlStatementEnd_ACU(content, match.index);
+      let statement = content.slice(match.index, end).trim();
+      statement = trimSqlStatementNoise_ACU(statement);
+
+      if (statement && isSqlContent(statement) && looksExecutableSqlPayload_ACU(statement)) {
+        statements.push(statement);
+      }
+
+      cursor = Math.max(end, match.index + 1);
+      startRe.lastIndex = cursor;
+    }
+
+    return statements;
+  }
+
+  function findSqlStatementEnd_ACU(input: string, start: number): number {
+    let quote: string | null = null;
+
+    for (let i = start; i < input.length; i++) {
+      const ch = input[i];
+      if (quote) {
+        if (ch === quote) {
+          if ((quote === "'" || quote === '"' || quote === '`') && input[i + 1] === quote) {
+            i++;
+          } else {
+            quote = null;
+          }
+        }
+        continue;
+      }
+
+      if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+        continue;
+      }
+      if (ch === ';') return i + 1;
+    }
+
+    return input.length;
+  }
+
+  function trimSqlStatementNoise_ACU(statement: string): string {
+    return statement
+      .replace(/\s*<\/?(?:tableEdit|content|output)[^>]*>[\s\S]*$/i, '')
+      .replace(/\s*```[\s\S]*$/i, '')
+      .replace(/;\s*["'`]\s*$/g, ';')
+      .trim();
   }
 
   function looksExecutableSqlPayload_ACU(payload: string): boolean {

@@ -142,10 +142,25 @@ export function generateInserts(sheet: Sheet_ACU, tableName?: string): string[] 
   });
 
   const statements: string[] = [];
+  const rowIdColumnIndex = columnNames.findIndex(col => String(col).toLowerCase() === 'row_id');
+  const seenRowIds = new Set<string>();
 
   for (let r = 1; r < content.length; r++) {
     const row = content[r];
     if (!Array.isArray(row)) continue;
+
+    // 历史 checkpoint / 模板 seedRows 合并异常时，可能出现同一张表内两行 row_id 相同：
+    // 第一行通常是聊天中已更新过的真实状态，后面的重复行多为模板初始 seed。
+    // 直接生成 INSERT 会触发 UNIQUE constraint failed，导致整张表加载失败并在 UI 中“缺失”。
+    // 因此在加载快照时保留第一条 row_id，跳过后续重复行，优先保护已有剧情状态。
+    if (rowIdColumnIndex >= 0) {
+      const rowIdKey = normalizeRowIdKeyForInsertDedup(row[rowIdColumnIndex]);
+      if (rowIdKey && seenRowIds.has(rowIdKey)) {
+        logWarn_ACU(`[Schema] generateInserts: 表 ${tblName} 检测到重复 row_id=${rowIdKey}，已跳过第 ${r} 行以避免主键冲突`);
+        continue;
+      }
+      if (rowIdKey) seenRowIds.add(rowIdKey);
+    }
 
     const values: string[] = [];
     for (let c = 0; c < columnNames.length; c++) {
@@ -253,6 +268,12 @@ function escapeValue(val: string | null | undefined): string {
   if (/^-?\d+(\.\d+)?$/.test(val)) return val;
   // 字符串：单引号转义
   return `'${val.replace(/'/g, "''")}'`;
+}
+
+function normalizeRowIdKeyForInsertDedup(val: unknown): string | null {
+  if (val === null || val === undefined) return null;
+  const key = String(val).trim();
+  return key ? key : null;
 }
 
 /**

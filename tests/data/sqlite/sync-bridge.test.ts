@@ -136,6 +136,22 @@ describe('SyncBridge', () => {
       ]);
     });
 
+    it('加载含重复 row_id 的快照时不应导致整张表缺失，并保留第一条状态行', () => {
+      const sheet = makeSheet({
+        content: [
+          ['row_id', '物品名称', '数量', '描述'],
+          ['1', '已更新铁剑', '9', '聊天中的真实状态'],
+          [1, '模板铁剑', '1', '重复的模板 seed'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_0: sheet }))).not.toThrow();
+      expect(engine.getTableNames()).toContain('inventory');
+      expect(engine.query('SELECT item_name, quantity, description FROM inventory ORDER BY row_id;').values).toEqual([
+        ['已更新铁剑', 9, '聊天中的真实状态'],
+      ]);
+    });
+
     it('同一次加载中多张 sheet 指向不同 SQL 表时均应正常加载并保留数据', () => {
       const globalStateSheet = makeSheet({
         uid: 'global_state',

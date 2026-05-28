@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 III
 // @namespace    http://tampermonkey.net/
-// @version      3.7.3
+// @version      3.7.4
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -3108,6 +3108,7 @@ $CONTENT
         rerankEndpoint: '',
         rerankApiKey: '',
         rerankModel: '',
+        rerankInstruction: '请根据当前用户输入及关键词，判断每个候选纪要条目的相关性，并将最相关的条目按相关性从高到低降序排列。优先选择能够直接回答、延续或补全当前用户输入意图的条目。',
         vectorNamespace: 'chat',
         entryComment: 'TavernDB-ACU-VectorMemory',
         entryKey: 'TavernDB-ACU-VectorMemory-Key',
@@ -3978,6 +3979,7 @@ $CONTENT
             rerankEndpoint: normalizeTextField_ACU(source.rerankEndpoint, defaults.rerankEndpoint),
             rerankApiKey: normalizeTextField_ACU(source.rerankApiKey, defaults.rerankApiKey),
             rerankModel: normalizeTextField_ACU(source.rerankModel, defaults.rerankModel),
+            rerankInstruction: typeof source.rerankInstruction === 'string' ? source.rerankInstruction.trim() : defaults.rerankInstruction,
             vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
             entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
             entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
@@ -8702,18 +8704,11 @@ $CONTENT
     function extractSqlPayload_ACU(content) {
         if (typeof content !== 'string')
             return null;
-        const normalized = content.replace(/<!--|-->/g, '').trim();
+        const normalized = normalizeSqlPayloadText_ACU(content);
         if (!normalized)
             return null;
-        const sqlStartRe = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|REPLACE\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|UPDATE\s+(?:OR\s+\w+\s+)?[`"'\[]?[\w\u4e00-\u9fff][\w\u4e00-\u9fff`"'\]\[]*\s+SET\b|DELETE\s+FROM\s+[`"'\[]?[\w\u4e00-\u9fff]|ALTER\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|CREATE\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|DROP\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|BEGIN(?:\s+TRANSACTION)?\b)/i;
-        const match = sqlStartRe.exec(normalized);
-        if (!match || typeof match.index !== 'number')
-            return null;
-        let payload = normalized.slice(match.index).trim();
-        payload = payload.replace(/\s*<\/(?:tableEdit|content|output)>[\s\S]*$/i, '').trim();
-        payload = payload.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-        payload = payload.replace(/;\s*["'`]\s*$/g, ';').trim();
-        return isSqlContent(payload) && looksExecutableSqlPayload_ACU(payload) ? payload : null;
+        const statements = extractExecutableSqlStatements_ACU(normalized);
+        return statements.length > 0 ? statements.join('\n') : null;
     }
     function coerceSqliteTableEditPayload_ACU(content) {
         if (typeof content !== 'string')
@@ -9077,6 +9072,68 @@ $CONTENT
         if (typeof value === 'boolean')
             return value ? '1' : '0';
         return `'${String(value).replace(/'/g, "''")}'`;
+    }
+    const SQL_START_RE_ACU = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|REPLACE\s+(?:OR\s+\w+\s+)?INTO\s+[`"'\[]?[\w\u4e00-\u9fff]|UPDATE\s+(?:OR\s+\w+\s+)?[`"'\[]?[\w\u4e00-\u9fff][\w\u4e00-\u9fff`"'\]\[]*\s+SET\b|DELETE\s+FROM\s+[`"'\[]?[\w\u4e00-\u9fff]|ALTER\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|CREATE\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|DROP\s+TABLE\s+[`"'\[]?[\w\u4e00-\u9fff]|BEGIN(?:\s+TRANSACTION)?\b)/i;
+    function normalizeSqlPayloadText_ACU(content) {
+        return content
+            .replace(/<thinking[^>]*>[\s\S]*?<\/thinking>/gi, '')
+            .replace(/<thought[^>]*>[\s\S]*?<\/thought>/gi, '')
+            .replace(/<\/?(?:thinking|thought)[^>]*>/gi, '')
+            .replace(/<!--|-->/g, '')
+            .replace(/```(?:sql)?/gi, '\n')
+            .replace(/```/g, '\n')
+            .replace(/<\/?(?:tableEdit|content|output)[^>]*>/gi, '\n')
+            .trim();
+    }
+    function extractExecutableSqlStatements_ACU(content) {
+        const statements = [];
+        const startRe = new RegExp(SQL_START_RE_ACU.source, 'ig');
+        let cursor = 0;
+        let match;
+        while ((match = startRe.exec(content)) !== null) {
+            if (match.index < cursor)
+                continue;
+            const end = findSqlStatementEnd_ACU(content, match.index);
+            let statement = content.slice(match.index, end).trim();
+            statement = trimSqlStatementNoise_ACU(statement);
+            if (statement && isSqlContent(statement) && looksExecutableSqlPayload_ACU(statement)) {
+                statements.push(statement);
+            }
+            cursor = Math.max(end, match.index + 1);
+            startRe.lastIndex = cursor;
+        }
+        return statements;
+    }
+    function findSqlStatementEnd_ACU(input, start) {
+        let quote = null;
+        for (let i = start; i < input.length; i++) {
+            const ch = input[i];
+            if (quote) {
+                if (ch === quote) {
+                    if ((quote === "'" || quote === '"' || quote === '`') && input[i + 1] === quote) {
+                        i++;
+                    }
+                    else {
+                        quote = null;
+                    }
+                }
+                continue;
+            }
+            if (ch === "'" || ch === '"' || ch === '`') {
+                quote = ch;
+                continue;
+            }
+            if (ch === ';')
+                return i + 1;
+        }
+        return input.length;
+    }
+    function trimSqlStatementNoise_ACU(statement) {
+        return statement
+            .replace(/\s*<\/?(?:tableEdit|content|output)[^>]*>[\s\S]*$/i, '')
+            .replace(/\s*```[\s\S]*$/i, '')
+            .replace(/;\s*["'`]\s*$/g, ';')
+            .trim();
     }
     function looksExecutableSqlPayload_ACU(payload) {
         const trimmed = payload.trim();
@@ -10257,10 +10314,25 @@ $CONTENT
             return h ? chineseToIdentifier(h) : `col_${i}`;
         });
         const statements = [];
+        const rowIdColumnIndex = columnNames.findIndex(col => String(col).toLowerCase() === 'row_id');
+        const seenRowIds = new Set();
         for (let r = 1; r < content.length; r++) {
             const row = content[r];
             if (!Array.isArray(row))
                 continue;
+            // 历史 checkpoint / 模板 seedRows 合并异常时，可能出现同一张表内两行 row_id 相同：
+            // 第一行通常是聊天中已更新过的真实状态，后面的重复行多为模板初始 seed。
+            // 直接生成 INSERT 会触发 UNIQUE constraint failed，导致整张表加载失败并在 UI 中“缺失”。
+            // 因此在加载快照时保留第一条 row_id，跳过后续重复行，优先保护已有剧情状态。
+            if (rowIdColumnIndex >= 0) {
+                const rowIdKey = normalizeRowIdKeyForInsertDedup(row[rowIdColumnIndex]);
+                if (rowIdKey && seenRowIds.has(rowIdKey)) {
+                    logWarn_ACU(`[Schema] generateInserts: 表 ${tblName} 检测到重复 row_id=${rowIdKey}，已跳过第 ${r} 行以避免主键冲突`);
+                    continue;
+                }
+                if (rowIdKey)
+                    seenRowIds.add(rowIdKey);
+            }
             const values = [];
             for (let c = 0; c < columnNames.length; c++) {
                 const val = c < row.length ? row[c] : null;
@@ -10346,6 +10418,12 @@ $CONTENT
             return val;
         // 字符串：单引号转义
         return `'${val.replace(/'/g, "''")}'`;
+    }
+    function normalizeRowIdKeyForInsertDedup(val) {
+        if (val === null || val === undefined)
+            return null;
+        const key = String(val).trim();
+        return key ? key : null;
     }
     /**
      * 清理 SQL 标识符（防止注入）
@@ -50479,14 +50557,18 @@ $CONTENT
             const apiKey = normalizeText_ACU(config.rerankApiKey);
             if (apiKey)
                 headers.Authorization = `Bearer ${apiKey}`;
+            const instruction = normalizeText_ACU(config.rerankInstruction);
+            const body = {
+                model,
+                query,
+                documents: candidates.map((candidate) => candidate.chunk.text),
+            };
+            if (instruction)
+                body.instruction = instruction;
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({
-                    model,
-                    query,
-                    documents: candidates.map((candidate) => candidate.chunk.text),
-                }),
+                body: JSON.stringify(body),
             });
             if (!response.ok)
                 throw new Error(await response.text().catch(() => response.statusText));
@@ -84708,6 +84790,7 @@ Expected function or array of functions, received type ${typeof value}.`
             rerankEndpoint: "",
             rerankModel: "",
             rerankApiKey: "",
+            rerankInstruction: "",
         };
     }
     function useVectorApiConfig() {
@@ -84723,6 +84806,7 @@ Expected function or array of functions, received type ${typeof value}.`
             form.rerankEndpoint = config.rerankEndpoint || "";
             form.rerankModel = config.rerankModel || "";
             form.rerankApiKey = config.rerankApiKey || "";
+            form.rerankInstruction = config.rerankInstruction ?? "";
             errors.value = [];
         }
         function save() {
@@ -84733,6 +84817,7 @@ Expected function or array of functions, received type ${typeof value}.`
             config.rerankEndpoint = form.rerankEndpoint.trim();
             config.rerankModel = form.rerankModel.trim();
             config.rerankApiKey = form.rerankApiKey;
+            config.rerankInstruction = form.rerankInstruction.trim();
             const validation = validateSummaryVectorIndexConfig_ACU(config);
             if (!validation.valid) {
                 errors.value = formatVectorApiErrors(validation.errors);
@@ -85357,8 +85442,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-bf7ee0f0] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-bf7ee0f0] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-bf7ee0f0] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-bf7ee0f0] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-bf7ee0f0] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 18px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-bf7ee0f0]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-bf7ee0f0] {\r\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-bf7ee0f0] {\r\n  width: 100%;\r\n  margin: 0 0 2px;\r\n  padding: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-bf7ee0f0] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-bf7ee0f0] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  color: var(--acu-text-3);\r\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-bf7ee0f0] {\r\n  flex: 1 1 auto;\r\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-bf7ee0f0] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-bf7ee0f0] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-bf7ee0f0] {\r\n    padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-bf7ee0f0");
-    var VectorIndexPage_vue_vue_type_style_index_0_scoped_bf7ee0f0_lang = null;
+    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-6a1bec58] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-6a1bec58] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-6a1bec58] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-6a1bec58] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-6a1bec58] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 18px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-6a1bec58]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-6a1bec58] {\r\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-6a1bec58] {\r\n  width: 100%;\r\n  margin: 0 0 2px;\r\n  padding: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-6a1bec58] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-6a1bec58] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  color: var(--acu-text-3);\r\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-6a1bec58] {\r\n  flex: 1 1 auto;\r\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-6a1bec58] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-6a1bec58] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-6a1bec58] {\r\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-6a1bec58] {\r\n  width: 100%;\r\n  min-height: 60px;\r\n  padding: 6px 8px;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\r\n  border-radius: 4px;\r\n  background: var(--acu-bg-2, transparent);\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.5;\r\n  resize: vertical;\n}\r\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-6a1bec58");
+    var VectorIndexPage_vue_vue_type_style_index_0_scoped_6a1bec58_lang = null;
 
     const _hoisted_1$g = { class: "acu-v2-vector-index-page" };
     const _hoisted_2$f = { class: "acu-v2-vector-index-page__panel-stack" };
@@ -85390,14 +85475,14 @@ Expected function or array of functions, received type ${typeof value}.`
     				}, 8, ["variant"])]),
     				default: withCtx(() => [
     					createVNode($setup["AcuStatsList"], { items: $setup.vector.statusStatsItems.value }, null, 8, ["items"]),
-    					_cache[26] || (_cache[26] = createBaseVNode(
+    					_cache[27] || (_cache[27] = createBaseVNode(
     						"p",
     						{ class: "acu-v2-vector-index-page__hint" },
     						" 发送前流程：关键词生成 → 用户输入与关键词合并 embedding → 概要列 chunk 预筛 → 可选 Rerank → 按纪要表原顺序覆盖原概要索引条目。 ",
     						-1
     						/* CACHED */
     					)),
-    					_cache[27] || (_cache[27] = createBaseVNode(
+    					_cache[28] || (_cache[28] = createBaseVNode(
     						"div",
     						{
     							class: "acu-v2-vector-index-page__maintenance-spacer",
@@ -85413,7 +85498,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
     							onClick: $setup.vector.buildNow
     						}, {
-    							default: withCtx(() => [_cache[22] || (_cache[22] = createBaseVNode(
+    							default: withCtx(() => [_cache[23] || (_cache[23] = createBaseVNode(
     								"i",
     								{ class: "fa-solid fa-brain" },
     								null,
@@ -85430,7 +85515,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
     							onClick: $setup.vector.migrateLegacyIndex
     						}, {
-    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+    							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
     								" 非破坏迁移旧索引 ",
     								-1
     								/* CACHED */
@@ -85441,7 +85526,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
     							onClick: $setup.vector.clearIndexCache
     						}, {
-    							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
+    							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
     								" 清空临时缓存 ",
     								-1
     								/* CACHED */
@@ -85453,7 +85538,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
     							onClick: $setup.onDeleteCurrentIndex
     						}, {
-    							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
+    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
     								" 删除当前索引 ",
     								-1
     								/* CACHED */
@@ -85522,7 +85607,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					},
     					[
     						createBaseVNode("fieldset", _hoisted_6$9, [
-    							_cache[28] || (_cache[28] = createBaseVNode(
+    							_cache[29] || (_cache[29] = createBaseVNode(
     								"legend",
     								null,
     								"Embedding",
@@ -85558,7 +85643,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							})
     						]),
     						createBaseVNode("fieldset", _hoisted_7$8, [
-    							_cache[29] || (_cache[29] = createBaseVNode(
+    							_cache[30] || (_cache[30] = createBaseVNode(
     								"legend",
     								null,
     								"Rerank",
@@ -85591,6 +85676,24 @@ Expected function or array of functions, received type ${typeof value}.`
     									autocomplete: "off"
     								}, null, 8, ["modelValue"])]),
     								_: 1
+    							}),
+    							createVNode($setup["AcuFormRow"], {
+    								label: "重排指令",
+    								hint: "默认启用；清空后不向 Rerank 服务发送 instruction，可用于兼容不支持该字段的服务。"
+    							}, {
+    								default: withCtx(() => [withDirectives(createBaseVNode(
+    									"textarea",
+    									{
+    										"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.vectorApiConfig.form.rerankInstruction = $event),
+    										class: "acu-v2-vector-api-form__instruction-textarea",
+    										rows: "3",
+    										placeholder: "留空则不发送 instruction"
+    									},
+    									null,
+    									512
+    									/* NEED_PATCH */
+    								), [[vModelText, $setup.vectorApiConfig.form.rerankInstruction]])]),
+    								_: 1
     							})
     						]),
     						$setup.vectorApiConfig.errors.value.length ? (openBlock(), createBlock($setup["AcuMessage"], {
@@ -85618,7 +85721,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							variant: "primary",
     							"native-type": "submit"
     						}, {
-    							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
+    							default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
     								"保存",
     								-1
     								/* CACHED */
@@ -85647,7 +85750,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					key: 0,
     					kind: "warning"
     				}, {
-    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+    					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
     						" 关键词生成提示词为空，发送前会直接用用户输入参与召回；建议载入默认提示词后保存。 ",
     						-1
     						/* CACHED */
@@ -85655,9 +85758,9 @@ Expected function or array of functions, received type ${typeof value}.`
     					_: 1
     				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_9$7, [createVNode($setup["AcuButton"], {
     					variant: "primary",
-    					onClick: _cache[9] || (_cache[9] = ($event) => $setup.promptDrawerOpen = true)
+    					onClick: _cache[10] || (_cache[10] = ($event) => $setup.promptDrawerOpen = true)
     				}, {
-    					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+    					default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
     						"编辑提示词",
     						-1
     						/* CACHED */
@@ -85687,7 +85790,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							type: "number",
     							min: 1,
     							step: 1,
-    							onChange: _cache[10] || (_cache[10] = ($event) => $setup.vector.setNumberField("summaryIndexKeywordMinRows", $event))
+    							onChange: _cache[11] || (_cache[11] = ($event) => $setup.vector.setNumberField("summaryIndexKeywordMinRows", $event))
     						}, null, 8, ["model-value"])]),
     						_: 1
     					}),
@@ -85700,7 +85803,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							type: "number",
     							min: 1,
     							step: 1,
-    							onChange: _cache[11] || (_cache[11] = ($event) => $setup.vector.setNumberField("topK", $event))
+    							onChange: _cache[12] || (_cache[12] = ($event) => $setup.vector.setNumberField("topK", $event))
     						}, null, 8, ["model-value"])]),
     						_: 1
     					}),
@@ -85714,7 +85817,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							min: 0,
     							max: 1,
     							step: .01,
-    							onChange: _cache[12] || (_cache[12] = ($event) => $setup.vector.setMinScore($event))
+    							onChange: _cache[13] || (_cache[13] = ($event) => $setup.vector.setMinScore($event))
     						}, null, 8, ["model-value"])]),
     						_: 1
     					}),
@@ -85727,7 +85830,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							type: "number",
     							min: 1,
     							step: 1,
-    							onChange: _cache[13] || (_cache[13] = ($event) => $setup.vector.setNumberField("recallCandidateLimit", $event))
+    							onChange: _cache[14] || (_cache[14] = ($event) => $setup.vector.setNumberField("recallCandidateLimit", $event))
     						}, null, 8, ["model-value"])]),
     						_: 1
     					}),
@@ -85740,8 +85843,8 @@ Expected function or array of functions, received type ${typeof value}.`
     							type: "number",
     							min: 1,
     							step: 1,
-    							"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.vector.previewRecentFixedInjectCount($event)),
-    							onChange: _cache[15] || (_cache[15] = ($event) => $setup.vector.setNumberField("recentFixedInjectCount", $event))
+    							"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.vector.previewRecentFixedInjectCount($event)),
+    							onChange: _cache[16] || (_cache[16] = ($event) => $setup.vector.setNumberField("recentFixedInjectCount", $event))
     						}, null, 8, ["model-value"])]),
     						_: 1
     					}),
@@ -85753,7 +85856,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							"model-value": $setup.vector.form.vectorNamespace,
     							type: "text",
     							placeholder: "chat",
-    							onChange: _cache[16] || (_cache[16] = ($event) => $setup.vector.setApiField("vectorNamespace", $event))
+    							onChange: _cache[17] || (_cache[17] = ($event) => $setup.vector.setApiField("vectorNamespace", $event))
     						}, null, 8, ["model-value"])]),
     						_: 1
     					})
@@ -85773,7 +85876,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						type: "number",
     						min: 1,
     						step: 1,
-    						onChange: _cache[17] || (_cache[17] = ($event) => $setup.vector.setNumberField("summaryChunkSentenceCount", $event))
+    						onChange: _cache[18] || (_cache[18] = ($event) => $setup.vector.setNumberField("summaryChunkSentenceCount", $event))
     					}, null, 8, ["model-value"])]),
     					_: 1
     				}), createVNode($setup["AcuFormRow"], {
@@ -85785,7 +85888,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						type: "number",
     						min: 1,
     						step: 1,
-    						onChange: _cache[18] || (_cache[18] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxConcurrency", $event))
+    						onChange: _cache[19] || (_cache[19] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxConcurrency", $event))
     					}, null, 8, ["model-value"])]),
     					_: 1
     				})])]),
@@ -85799,11 +85902,11 @@ Expected function or array of functions, received type ${typeof value}.`
     			dirty: $setup.vector.promptDirty.value,
     			message: $setup.vector.message.value,
     			"role-options": $setup.ROLE_OPTIONS,
-    			onClose: _cache[19] || (_cache[19] = ($event) => $setup.promptDrawerOpen = false),
+    			onClose: _cache[20] || (_cache[20] = ($event) => $setup.promptDrawerOpen = false),
     			onSave: $setup.vector.savePromptGroup,
     			onReset: $setup.vector.resetPromptGroup,
-    			onAdd: _cache[20] || (_cache[20] = ($event) => $setup.vector.addPromptSegment($event)),
-    			onDelete: _cache[21] || (_cache[21] = ($event) => $setup.vector.deletePromptSegment($event)),
+    			onAdd: _cache[21] || (_cache[21] = ($event) => $setup.vector.addPromptSegment($event)),
+    			onDelete: _cache[22] || (_cache[22] = ($event) => $setup.vector.deletePromptSegment($event)),
     			onUpdate: $setup.onPromptUpdate
     		}, null, 8, [
     			"is-open",
@@ -85815,7 +85918,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		])
     	]);
     }
-    var VectorIndexPage = /* @__PURE__ */ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-bf7ee0f0"]]);
+    var VectorIndexPage = /* @__PURE__ */ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-6a1bec58"]]);
 
     /**
      * useDataManagement — 数据管理页业务流编排

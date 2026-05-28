@@ -232,6 +232,24 @@ describe('generateInserts', () => {
     expect(inserts[0]).toContain('test_table');
   });
 
+  it('重复 row_id 时跳过后续重复行，保留第一条真实状态', () => {
+    const sheet = makeSheet({
+      sourceData: {
+        ddl: 'CREATE TABLE test_table (row_id INTEGER PRIMARY KEY, name TEXT);',
+      } as any,
+      content: [
+        ['row_id', 'name'],
+        ['1', '已更新状态'],
+        [1, '模板初始状态'],
+        ['2', '第二行'],
+      ],
+    });
+    const inserts = generateInserts(sheet, 'test_table');
+    expect(inserts).toHaveLength(2);
+    expect(inserts.join('\n')).toContain("'已更新状态'");
+    expect(inserts.join('\n')).not.toContain("'模板初始状态'");
+  });
+
   it('null 值转为 NULL', () => {
     const sheet = makeSheet({
       content: [

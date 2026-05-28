@@ -199,6 +199,23 @@ describe('extractSqlPayload_ACU', () => {
     const content = "prose\nINSERT INTO inventory VALUES (1,'sword',3);\"";
     expect(extractSqlPayload_ACU(content)).toBe("INSERT INTO inventory VALUES (1,'sword',3);");
   });
+
+  it('drops restarted prose and nested wrapper text between SQL statements', () => {
+    const content = [
+      'UPDATE inventory SET quantity=4 WHERE row_id=1;',
+      '` 标签和 SQL。',
+      '开始生成输出。',
+      '<content>',
+      '<tableEdit>',
+      "UPDATE inventory SET item_name='potion' WHERE row_id=2;",
+      '</tableEdit>',
+      '</content>',
+    ].join('\n');
+    expect(extractSqlPayload_ACU(content)).toBe([
+      'UPDATE inventory SET quantity=4 WHERE row_id=1;',
+      "UPDATE inventory SET item_name='potion' WHERE row_id=2;",
+    ].join('\n'));
+  });
 });
 
 // extractTableEditInner_ACU

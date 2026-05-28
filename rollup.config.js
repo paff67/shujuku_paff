@@ -24,7 +24,7 @@ const BUILD_MODE = process.env.BUILD_MODE || 'userscript';
 const USER_SCRIPT_BANNER = `// ==UserScript==
 // @name         SP·数据库 III
 // @namespace    http://tampermonkey.net/
-// @version      3.7.3
+// @version      3.7.4
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
