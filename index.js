@@ -7267,12 +7267,6 @@ $CONTENT
                     migratedCheckpointMessageIndex = migrationResult.messageIndex;
                     migratedCheckpoint = cloneJson_ACU$4(migrationResult.checkpoint);
                     changed = true;
-                    for (let i = 0; i <= legacyBoundaryIndex; i++) {
-                        const message = chat[i];
-                        if (!message || message.is_user)
-                            continue;
-                        clearCurrentIsolationLegacyTableSnapshots_ACU(message, context.isolationKey, context.isolationConfig);
-                    }
                 }
             }
             catch (error) {
@@ -7425,18 +7419,18 @@ $CONTENT
         const trackingKeySet = new Set(Array.isArray(trackingSheetKeys)
             ? trackingSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)
             : []);
-        const actuallyModifiedKeys = keysToSave.filter(sheetKey => trackingKeySet.has(sheetKey));
-        if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
+        const keysToTrackAsUpdated = Array.from(trackingKeySet);
+        if (trackAsUpdate && keysToTrackAsUpdated.length > 0) {
             const existingModifiedKeys = currentTagData.modifiedKeys || [];
-            currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...actuallyModifiedKeys])];
+            currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...keysToTrackAsUpdated])];
             logDebug_ACU(`[Tracking] Recorded modified keys for tag [${currentIsolationKey || '无标签'}] at index ${finalIndex}: ${currentTagData.modifiedKeys.join(', ')}`);
         }
-        if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length > 0) {
+        if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && keysToTrackAsUpdated.length > 0) {
             const existingGroupKeys = currentTagData.updateGroupKeys || [];
             currentTagData.updateGroupKeys = [...new Set([...existingGroupKeys, ...updateGroupKeys])];
             logDebug_ACU(`[Merge Update Success] Group keys for tag [${currentIsolationKey || '无标签'}] recorded at index ${finalIndex}: ${currentTagData.updateGroupKeys.join(', ')}`);
         }
-        else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length === 0) {
+        else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && keysToTrackAsUpdated.length === 0) {
             logDebug_ACU(`[Merge Update Failed] No tables were modified for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
         }
         const isolationConfig = {
@@ -7473,8 +7467,8 @@ $CONTENT
             before: resolvedBeforeData,
             after: resolvedAfterData,
             targetSheetKeys: keysToSave,
-            modifiedKeys: trackAsUpdate ? actuallyModifiedKeys : [],
-            updateGroupKeys: trackAsUpdate && actuallyModifiedKeys.length > 0 ? (updateGroupKeys || []) : [],
+            modifiedKeys: trackAsUpdate ? keysToTrackAsUpdated : [],
+            updateGroupKeys: trackAsUpdate && keysToTrackAsUpdated.length > 0 ? (updateGroupKeys || []) : [],
             isolationKey: currentIsolationKey,
             targetMessageIndex: finalIndex,
             baseCheckpointId: baseCheckpoint?.checkpointId,
@@ -7492,7 +7486,7 @@ $CONTENT
         }
         writeMessageIdentity_ACU(targetMessage, isolationConfig);
         clearCurrentIsolationLegacyTableSnapshots_ACU(targetMessage, currentIsolationKey, isolationConfig);
-        logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables. Delta written: ${!!delta}.`);
+        logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Tracked updated: ${keysToTrackAsUpdated.length} tables. Delta written: ${!!delta}.`);
         await saveChatToHost_ACU();
         return { saved: true, messageIndex: finalIndex };
     }
@@ -11386,9 +11380,8 @@ $CONTENT
                 // 可能在表结构/指导表合并后看起来像空壳，但它仍然代表历史快照，必须加载进 SQLite。
                 const mergeResult = await mergeAllIndependentTablesWithMeta_ACU();
                 const mergedData = mergeResult.data;
-                const hasAnyMergedSheet = !!mergedData && Object.keys(mergedData).some(k => k.startsWith('sheet_'));
                 // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
-                // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
+                // 还是仅仅是模板/历史快照恢复出的结构（只有表头没有数据行）。
                 // 空壳结构不应触发建表——用户可能还要改表结构。
                 // [修复] 同时排除来自基底状态消息的数据（seedGreeting 写入的模板初始数据），
                 // 这些数据虽然 content.length > 1（包含 seedRows），但不是 AI 真正填写的数据，
@@ -11404,8 +11397,10 @@ $CONTENT
                         return false;
                     return true;
                 });
-                const shouldLoadMigratedLegacySnapshot = mergeResult.usedLegacyMigration && hasAnyMergedSheet;
-                if (!mergedData || (!hasRealDataRows && !shouldLoadMigratedLegacySnapshot)) {
+                // legacy 迁移阶段只负责把历史快照转换到本地聊天层（V2/checkpoint + JSON视图），
+                // 不应在 loadFromChat 阶段触发 SQLite 建表；建表延迟到首次真实写操作。
+                const shouldSkipSqlLoadForLegacyMigration = !!mergeResult.usedLegacyMigration;
+                if (!mergedData || !hasRealDataRows || shouldSkipSqlLoadForLegacyMigration) {
                     // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
                     // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
                     // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
@@ -23784,6 +23779,9 @@ $CONTENT
         const historicalData = { mate: { type: 'chatSheets', version: 1 } };
         const encounteredKeys = [];
         const encounteredSet = new Set();
+        const hasSheetTables = (dataObj) => (!!dataObj
+            && typeof dataObj === 'object'
+            && Object.keys(dataObj).some(key => key.startsWith('sheet_')));
         const appendTables = (dataObj, { summaryOnly = null } = {}) => {
             if (!dataObj || typeof dataObj !== 'object' || Array.isArray(dataObj))
                 return;
@@ -23807,9 +23805,25 @@ $CONTENT
             const message = chat[i];
             if (!message || message.is_user)
                 continue;
-            // ── 只从 V2 隔离数据读取，不再扫描旧格式 ──
+            const isolationConfig = {
+                enabled: !!settings_ACU?.dataIsolationEnabled,
+                code: String(settings_ACU?.dataIsolationCode || ''),
+            };
+            // ── 优先读取 V2 隔离数据 ──
             const tagData = readIsolatedTagData_ACU(message, normalizedKey);
-            appendTables(tagData?.independentData);
+            const hasV2IndependentTables = hasSheetTables(tagData?.independentData);
+            if (hasV2IndependentTables) {
+                appendTables(tagData?.independentData);
+            }
+            // ── 兼容旧 native：仅当该消息没有有效 V2 sheet 数据时，回退读取旧格式 ──
+            if (!hasV2IndependentTables && isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
+                const legacyIndependent = readLegacyIndependentData_ACU(message);
+                appendTables(legacyIndependent, { summaryOnly: false });
+                const legacyStandard = readLegacyStandardData_ACU(message);
+                appendTables(legacyStandard, { summaryOnly: false });
+                // 历史模板 guide 只需要结构和参数，不需要把总结/大纲混入普通模板结构
+                // 总结/大纲在运行时合并链路中由历史数据重建保障
+            }
         }
         if (encounteredKeys.length === 0)
             return null;
@@ -32667,7 +32681,14 @@ $CONTENT
                             logDebug_ACU('[Init] First time initialization detected. Saving complete template structure with all tables.');
                         }
                         const updateGroupKeysRaw = isFirstTimeInit ? keysToPersist : targetSheetKeys;
-                        const keysToTrackAsUpdated = keysToPersist.filter((sheetKey) => keysToActuallySave.includes(sheetKey));
+                        const hasActualTargetModification = keysToPersist.length > 0;
+                        let keysToTrackAsUpdated = keysToPersist.filter((sheetKey) => keysToActuallySave.includes(sheetKey));
+                        // 首次初始化是全量模板结构落盘，不代表 AI 对同组表做了更新决策；
+                        // 因此仅后续非初始化更新才将 targetSheetKeys 整组推进 tracking，
+                        // 使同组参与表在下一层计数中被识别为已在本层更新。
+                        if (!isFirstTimeInit && Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0 && hasActualTargetModification) {
+                            keysToTrackAsUpdated = Array.from(new Set(targetSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)));
+                        }
                         const updateGroupKeysToUse = Array.isArray(updateGroupKeysRaw)
                             ? updateGroupKeysRaw.filter(sheetKey => {
                                 const table = currentJsonTableData_ACU?.[sheetKey];
@@ -32990,7 +33011,7 @@ $CONTENT
      * 将 round 内多 group 的修改按各自 saveTargetIndex 分桶。
      *
      * round 内 AI 响应仍然合并 apply 一次，但持久化必须回到每个 group 对应的楼层。
-     * 这里只记录实际修改过的 sheet，避免 updateGroupKeys 把未修改表误判为已更新。
+     * targetSheetKeys 仅记录实际修改表；当组内存在实际修改时，tracking/updateGroup 记录整组参与表。
      */
     function buildRoundPersistenceTargets_ACU(roundItems, modifiedKeys) {
         if (!Array.isArray(roundItems) || roundItems.length === 0 || !Array.isArray(modifiedKeys) || modifiedKeys.length === 0) {
@@ -33013,8 +33034,8 @@ $CONTENT
                 trackingSheetKeys: [],
             };
             existing.targetSheetKeys = unionStrings_ACU(existing.targetSheetKeys, changedSheetKeys);
-            existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, changedSheetKeys);
-            existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, changedSheetKeys);
+            existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, groupSheetKeys);
+            existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, groupSheetKeys);
             targetsByIndex.set(targetMessageIndex, existing);
         }
         return Array.from(targetsByIndex.values()).sort((a, b) => a.targetMessageIndex - b.targetMessageIndex);
@@ -33366,8 +33387,13 @@ $CONTENT
                 const persistenceTargets = buildRoundPersistenceTargets_ACU(roundItems, applyResult.modifiedKeys);
                 if (failedGroups.length === 0) {
                     onProgress?.({ phase: 'saving', currentBatch: roundNumber, totalBatches: totalRounds, message: '正在保存合并后的更新到聊天记录...' });
-                    if (persistenceTargets.length === 0) {
+                    if (persistenceTargets.length === 0 && applyResult.modifiedKeys.length > 0) {
+                        // 有修改的表但没有可持久化的楼层，说明 buildRoundPersistenceTargets_ACU 内部出错，这是真正的失败
                         failedGroups.push({ key: roundItems[0].groupKey, error: '合并编辑成功但没有可持久化的目标楼层。' });
+                    }
+                    else if (persistenceTargets.length === 0) {
+                        // 完全无修改，跳过持久化，正常继续。这是正常业务路径，不是失败
+                        logDebug_ACU(`[Manual] Round ${roundNumber} 无实际表修改，跳过持久化。`);
                     }
                     const savedTargetIndices = [];
                     for (const target of persistenceTargets) {
