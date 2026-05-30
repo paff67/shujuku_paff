@@ -65,6 +65,21 @@ export function generateApiTabHTML(): string {
                                 <select id="${SCRIPT_ID_PREFIX_ACU}-api-model-select" class="text_pole">
                                     <option value="">-- 请先加载模型列表 --</option>
                                 </select>
+                                <div style="margin-top: 12px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-api-body-params">附加 Body 参数 (JSON 或 key:value):</label>
+                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-body-params" rows="3" placeholder='{"top_p":0.9,"frequency_penalty":0.5}' style="width: 100%; resize: vertical; font-family: monospace;"></textarea>
+                                    <small class="notes">优先按 JSON object 解析；也兼容每行 key:value / key=value。会合并进请求 body，覆盖同名默认字段。</small>
+                                </div>
+                                <div style="margin-top: 8px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-api-exclude-body-params">排除 Body 参数 (JSON 数组或逗号/换行):</label>
+                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-exclude-body-params" rows="2" placeholder='["stream","top_p"]' style="width: 100%; resize: vertical; font-family: monospace;"></textarea>
+                                    <small class="notes">列出的字段会在最终请求 body 中移除；适合兼容不接受某些 SillyTavern 参数的后端。</small>
+                                </div>
+                                <div style="margin-top: 8px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-api-request-headers">附加请求头 (JSON 或 Header: value):</label>
+                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-request-headers" rows="2" placeholder='{"X-Custom-Header":"value"}' style="width: 100%; resize: vertical; font-family: monospace;"></textarea>
+                                    <small class="notes">会追加到 custom_include_headers；同名 Authorization 会覆盖上方 API Key 自动生成的 Authorization。</small>
+                                </div>
                             </div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-api-status" class="notes" style="margin-top:12px;">状态: 未配置</div>
                             <div class="button-group">

@@ -11,6 +11,7 @@ import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerReque
 import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU } from '../../../shared/utils';
 import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, parseIfBlocksInContent_ACU, parseRandomTags_ACU, replaceRandomVariables_ACU } from '../../runtime/helpers-remaining';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
+import { buildCustomApiRequestBody_ACU } from '../custom-api-request';
 
   function normalizeRoleForApi_ACU(role: any) {
     const ru = String(role || '').toUpperCase();
@@ -248,25 +249,12 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
             
             const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
             
-            const body = JSON.stringify({
-              "messages": messages,
-              "model": effectiveApiConfig.model,
-              "temperature": effectiveApiConfig.temperature,
-              "top_p": effectiveApiConfig.top_p || 0.9,
-              "max_tokens": effectiveApiConfig.max_tokens,
-              "stream": settings_ACU.streamingEnabled || false,
-              "chat_completion_source": "custom",
-              "group_names": [],
-              "include_reasoning": false,
-              "reasoning_effort": "medium",
-              "enable_web_search": false,
-              "request_images": false,
-              "custom_prompt_post_processing": "strict",
-              "reverse_proxy": effectiveApiConfig.url,
-              "proxy_password": "",
-              "custom_url": effectiveApiConfig.url,
-              "custom_include_headers": effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : ""
-            });
+            const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
+              maxTokens: effectiveApiConfig.max_tokens,
+              temperature: effectiveApiConfig.temperature,
+              topP: effectiveApiConfig.top_p ?? 0.9,
+              stripModelPrefix: false,
+            }));
             
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
             const response = await fetch(generateUrl, { method: 'POST', headers, body, signal: abortSignal });

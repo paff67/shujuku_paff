@@ -17,6 +17,9 @@ export interface AcuV2ApiConfig {
   useMainApi: boolean;
   max_tokens: number;
   temperature: number;
+  bodyParams: string;
+  excludeBodyParams: string;
+  requestHeaders: string;
 }
 
 export interface AcuV2ApiPreset {
@@ -64,6 +67,9 @@ function normalizeApiConfig(value: any): AcuV2ApiConfig {
     useMainApi: source.useMainApi !== false,
     max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 60000,
     temperature: Number.isFinite(temperature) ? temperature : 1,
+    bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
+    excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
+    requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
   };
 }
 
@@ -139,7 +145,10 @@ function findPresetMatchingCurrentConfig(presets: AcuV2ApiPreset[]): AcuV2ApiPre
       preset.apiConfig.apiKey === current.apiConfig.apiKey &&
       preset.apiConfig.model === current.apiConfig.model &&
       preset.apiConfig.max_tokens === current.apiConfig.max_tokens &&
-      preset.apiConfig.temperature === current.apiConfig.temperature
+      preset.apiConfig.temperature === current.apiConfig.temperature &&
+      preset.apiConfig.bodyParams === current.apiConfig.bodyParams &&
+      preset.apiConfig.excludeBodyParams === current.apiConfig.excludeBodyParams &&
+      preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders
     );
   }) ?? null;
 }
@@ -334,7 +343,11 @@ export const useApiPresetStore = defineStore('acu-v2-api-presets', {
     async loadModelsForConfig(apiConfig: Partial<AcuV2ApiConfig>): Promise<boolean> {
       this.modelLoadStatus = 'loading';
       this.modelLoadError = '';
-      const result = await fetchAvailableModels_ACU(String(apiConfig.url || ''), String(apiConfig.apiKey || ''));
+      const result = await fetchAvailableModels_ACU(
+        String(apiConfig.url || ''),
+        String(apiConfig.apiKey || ''),
+        String(apiConfig.requestHeaders || ''),
+      );
       if (!result.success) {
         this.modelOptions = [];
         this.modelLoadStatus = 'error';

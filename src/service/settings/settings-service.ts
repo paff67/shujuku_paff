@@ -558,7 +558,7 @@ function refreshDefaultTableTemplateOnce_ACU(activeCode: string) {
 
 export   function buildDefaultSettings_ACU() {
       return {
-          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, bodyParams: '', excludeBodyParams: '', requestHeaders: '' },
           apiMode: 'custom',
           tavernProfile: '',
           streamingEnabled: false, // [新增] 流式传输开关（默认关闭）

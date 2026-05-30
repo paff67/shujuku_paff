@@ -17,6 +17,7 @@ import { updateOutlineTableEntry_ACU } from '../../../service/worldbook/injectio
 import { formatJsonToReadable_ACU } from '../../../service/runtime/helpers-remaining';
 import { getApiConfigByPreset_ACU } from '../../../service/ai/api-call';
 import { handleApiResponse_ACU } from '../../../service/ai/prompt-builder';
+import { buildCustomApiRequestBody_ACU } from '../../../service/ai/custom-api-request';
 import { cancelContentOptimization_ACU } from '../../../service/optimization/content-optimization';
 import { reoptimizeMessage_ACU } from '../../components/optimization-ui';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
@@ -169,26 +170,12 @@ export function createWorldbookAiApi(_ctx: ApiGroupContext): Record<string, Func
                         }
 
                         const url = `/api/backends/chat-completions/generate`;
-                        const body = JSON.stringify({
-                            "messages": messages,
-                            "model": effectiveApiConfig.model,
-                            "temperature": effectiveApiConfig.temperature || 1.0,
-                            "top_p": effectiveApiConfig.top_p || 0.9,
-                            "max_tokens": maxTokens,
-                            "stream": settings_ACU.streamingEnabled || false,
-                            "chat_completion_source": "custom",
-                            "group_names": [],
-                            "include_reasoning": false,
-                            "reasoning_effort": "medium",
-                            "enable_web_search": false,
-                            "request_images": false,
-                            "custom_prompt_post_processing": "strict",
-                            "reverse_proxy": effectiveApiConfig.url,
-                            "proxy_password": "",
-                            "custom_url": effectiveApiConfig.url,
-                            "custom_include_headers": effectiveApiConfig.apiKey ?
-                                `Authorization: Bearer ${effectiveApiConfig.apiKey}` : ""
-                        });
+                        const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
+                            maxTokens,
+                            temperature: effectiveApiConfig.temperature ?? 1.0,
+                            topP: effectiveApiConfig.top_p ?? effectiveApiConfig.topP ?? 0.9,
+                            stripModelPrefix: false,
+                        }));
 
                         const headers = {
                             ...getHostRequestHeaders_ACU(),

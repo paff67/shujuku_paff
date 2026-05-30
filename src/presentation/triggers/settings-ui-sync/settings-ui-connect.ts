@@ -44,6 +44,7 @@ import { evaluateNewMessageAction_ACU } from '../../../service/runtime/message-h
     }
     const apiUrl = String($customApiUrlInput_ACU.val() || '').trim();
     const apiKey = String($customApiKeyInput_ACU.val() || '');
+    const requestHeaders = String($popupInstance_ACU?.find(`#${SCRIPT_ID_PREFIX_ACU}-api-request-headers`).val() ?? settings_ACU.apiConfig?.requestHeaders ?? '');
     if (!apiUrl) {
       showToastr_ACU('warning', '请输入API基础URL。');
       $apiStatusDisplay_ACU.text('状态:请输入API基础URL').css('color', 'orange');
@@ -54,7 +55,7 @@ import { evaluateNewMessageAction_ACU } from '../../../service/runtime/message-h
 
     try {
         // [重构] 调用 service 层获取模型列表
-        const result = await fetchAvailableModels_ACU(apiUrl, apiKey);
+        const result = await fetchAvailableModels_ACU(apiUrl, apiKey, requestHeaders);
 
         if (!result.success) {
             throw new Error(result.error || '未知错误');

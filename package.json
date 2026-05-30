@@ -1,6 +1,6 @@
 {
   "name": "acu-star-database-iv",
-  "version": "3.7.4",
+  "version": "3.7.5",
   "private": true,
   "type": "module",
   "description": "SP·数据库 III (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",

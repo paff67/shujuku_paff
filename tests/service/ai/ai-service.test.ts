@@ -7,9 +7,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const {
   mockGetHostRequestHeaders,
   mockLogDebug,
+  mockLogWarn,
 } = vi.hoisted(() => ({
   mockGetHostRequestHeaders: vi.fn(() => ({ 'X-Custom': 'header' })),
   mockLogDebug: vi.fn(),
+  mockLogWarn: vi.fn(),
 }));
 
 vi.mock('../../../src/data/gateways/ai-gateway', () => ({
@@ -25,6 +27,7 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
 
 vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: mockLogDebug,
+  logWarn_ACU: mockLogWarn,
 }));
 
 import { fetchAvailableModels_ACU } from '../../../src/service/ai/ai-service';

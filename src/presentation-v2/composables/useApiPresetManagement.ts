@@ -9,6 +9,9 @@ export interface ApiPresetDraft {
   model: string;
   max_tokens: number;
   temperature: number;
+  bodyParams: string;
+  excludeBodyParams: string;
+  requestHeaders: string;
   tavernProfile: string;
 }
 
@@ -43,6 +46,9 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     model: '',
     max_tokens: 60000,
     temperature: 1,
+    bodyParams: '',
+    excludeBodyParams: '',
+    requestHeaders: '',
     tavernProfile: '',
   };
 }
@@ -57,6 +63,9 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     model: preset.apiConfig.model || '',
     max_tokens: Number(preset.apiConfig.max_tokens || 60000),
     temperature: Number(preset.apiConfig.temperature ?? 1),
+    bodyParams: preset.apiConfig.bodyParams || '',
+    excludeBodyParams: preset.apiConfig.excludeBodyParams || '',
+    requestHeaders: preset.apiConfig.requestHeaders || '',
     tavernProfile: preset.tavernProfile || '',
   };
 }
@@ -73,6 +82,9 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       useMainApi: draft.useMainApi,
       max_tokens: Math.max(1, Math.floor(Number(draft.max_tokens) || 60000)),
       temperature: Number.isFinite(Number(draft.temperature)) ? Number(draft.temperature) : 1,
+      bodyParams: draft.bodyParams || '',
+      excludeBodyParams: draft.excludeBodyParams || '',
+      requestHeaders: draft.requestHeaders || '',
     },
   };
 }

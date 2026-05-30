@@ -19,6 +19,7 @@ export {
 
 import { getHostRequestHeaders_ACU as _getHeaders } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU } from '../../shared/utils';
+import { buildCustomApiIncludeHeaders_ACU } from './custom-api-request';
 
 // ============================================================
 // 模型列表获取
@@ -35,7 +36,7 @@ export interface FetchModelsResult {
  * 纯业务逻辑：发送 HTTP 请求、解析响应、返回模型列表
  * 不涉及 UI（toast、状态显示由 presentation 层负责）
  */
-export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string): Promise<FetchModelsResult> {
+export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string, requestHeaders: string = ''): Promise<FetchModelsResult> {
     if (!apiUrl) {
         return { success: false, error: '请输入API基础URL。' };
     }
@@ -46,7 +47,7 @@ export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string): 
         "proxy_password": "",
         "chat_completion_source": "custom",
         "custom_url": apiUrl,
-        "custom_include_headers": apiKey ? `Authorization: Bearer ${apiKey}` : ""
+        "custom_include_headers": buildCustomApiIncludeHeaders_ACU({ apiKey, requestHeaders })
     };
 
     const response = await fetch(statusUrl, {

@@ -131,6 +131,39 @@
         </AcuFormRow>
       </div>
 
+      <template v-if="activeConnectionMode === 'custom'">
+        <AcuFormRow
+          label="附加 Body 参数"
+          hint="优先按 JSON object 解析；也兼容每行 key:value / key=value。"
+        >
+          <AcuTextarea
+            v-model="activeDraft.bodyParams"
+            :rows="3"
+            placeholder='{"top_p":0.9,"frequency_penalty":0.5}'
+          />
+        </AcuFormRow>
+        <AcuFormRow
+          label="排除 Body 参数"
+          hint="JSON 数组或逗号/换行列表；字段会从最终请求 body 中移除。"
+        >
+          <AcuTextarea
+            v-model="activeDraft.excludeBodyParams"
+            :rows="2"
+            placeholder='["stream","top_p"]'
+          />
+        </AcuFormRow>
+        <AcuFormRow
+          label="附加请求头"
+          hint="优先按 JSON object 解析；也兼容每行 Header: value。"
+        >
+          <AcuTextarea
+            v-model="activeDraft.requestHeaders"
+            :rows="2"
+            placeholder='{"X-Custom-Header":"value"}'
+          />
+        </AcuFormRow>
+      </template>
+
       <AcuMessage v-if="activeDraftError" kind="error">{{
         activeDraftError
       }}</AcuMessage>
@@ -184,6 +217,7 @@ import AcuPresetDropdown from "./_lib/AcuPresetDropdown.vue";
 import type { AcuSegmentedOption } from "./_lib/AcuSegmentedControl.vue";
 import AcuSegmentedControl from "./_lib/AcuSegmentedControl.vue";
 import AcuSelect, { type AcuSelectOption } from "./_lib/AcuSelect.vue";
+import AcuTextarea from "./_lib/AcuTextarea.vue";
 
 const store = useApiPresetStore();
 const toast = useToastStore();
@@ -336,6 +370,7 @@ async function loadModelsForActive(): Promise<void> {
   await store.loadModelsForConfig({
     url: activeDraft.url,
     apiKey: activeDraft.apiKey,
+    requestHeaders: activeDraft.requestHeaders,
   });
 }
 
